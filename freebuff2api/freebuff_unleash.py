@@ -349,14 +349,22 @@ class UnleashPool:
                 return True
             except RateLimitedError as e:
                 self.health.mark_exhausted(e.pool or pool, reset_at=e.reset_at)
+                # Session was deleted upstream but new one failed — clear slot
+                # so warmup recreates it later. Without this, the stale session
+                # would be served to requests and fail with 404.
+                async with self._lock:
+                    self._slots[account_index].pop(model, None)
                 logger.warning(
-                    "unleash refresh rate_limited account=%s model=%s — session will expire naturally",
+                    "unleash refresh rate_limited account=%s model=%s — slot cleared, session will be recreated",
                     account_index, model,
                 )
                 return False
             except Exception as e:
+                # Same: delete succeeded but new session failed → stale slot.
+                async with self._lock:
+                    self._slots[account_index].pop(model, None)
                 logger.warning(
-                    "unleash refresh failed account=%s model=%s: %s",
+                    "unleash refresh failed account=%s model=%s: %s — slot cleared",
                     account_index, model, e,
                 )
                 return False

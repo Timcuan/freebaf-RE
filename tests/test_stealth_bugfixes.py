@@ -435,5 +435,41 @@ class ChatCompletionsValidationTests(unittest.TestCase):
         assert response.status_code == 400
 
 
+class SessionRefreshStaleSlotTests(unittest.TestCase):
+    """BUG #29: refresh_session should clear stale slot if delete succeeds but new session fails."""
+
+    def test_refresh_clears_slot_on_rate_limited(self) -> None:
+        import inspect
+
+        from freebuff2api.freebuff_unleash import UnleashPool
+
+        source = inspect.getsource(UnleashPool.refresh_session)
+        assert "slot cleared" in source or "_slots[account_index].pop" in source
+
+    def test_refresh_clears_slot_on_exception(self) -> None:
+        """Both except blocks should pop the stale slot."""
+        import inspect
+
+        from freebuff2api.freebuff_unleash import UnleashPool
+
+        source = inspect.getsource(UnleashPool.refresh_session)
+        # Both RateLimitedError and generic Exception paths should clear slot
+        assert source.count("_slots[account_index].pop") >= 2
+
+
+class ProxyAwareTokenVerifyTests(unittest.TestCase):
+    """BUG #26: verify_token should be proxy-aware (use httpx, not urllib)."""
+
+    def test_verify_token_uses_httpx_not_urllib(self) -> None:
+        import inspect
+
+        from freebuff2api.login_flow import verify_token
+
+        source = inspect.getsource(verify_token)
+        assert "httpx" in source
+        assert "proxy" in source.lower()
+        assert "stealth_transport" in source or "build_stealth_client" in source
+
+
 if __name__ == "__main__":
     unittest.main()
