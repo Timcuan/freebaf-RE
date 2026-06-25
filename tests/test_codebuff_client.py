@@ -236,7 +236,7 @@ class CodebuffClientTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
 
         self.assertEqual(ctx.exception.status_code, 409)
-        self.assertIn("账号或服务器出口", str(ctx.exception))
+        self.assertIn("upstream restricted", str(ctx.exception))
         self.assertIn("DeepSeek V4 Flash", str(ctx.exception))
 
     async def test_chat_stream_explains_session_model_mismatch_as_region_limit(self) -> None:
@@ -272,7 +272,7 @@ class CodebuffClientTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
 
         self.assertEqual(ctx.exception.status_code, 409)
-        self.assertIn("账号或服务器出口", str(ctx.exception))
+        self.assertIn("upstream restricted", str(ctx.exception))
         self.assertIn("DeepSeek V4 Flash", str(ctx.exception))
 
     async def test_chat_events_uses_har_fingerprint_headers(self) -> None:

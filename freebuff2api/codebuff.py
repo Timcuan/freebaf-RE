@@ -861,8 +861,8 @@ def _upstream_error(
             upstream_message = data.get("message") or text
             return CodebuffError(
                 "Codebuff 409 session_model_mismatch: "
-                f"{upstream_message} 上游判定当前账号或服务器出口只允许 DeepSeek V4 Flash；"
-                "即使公网定位显示 US，也可能因出口 IP 段、账号状态或上游限免策略无法使用 Pro。",
+                f"{upstream_message} upstream restricted this account or egress IP to DeepSeek V4 Flash only; "
+                "even if public geoip shows US, the upstream IP range, account state, or free-tier policy may block Pro models.",
                 409,
             )
 

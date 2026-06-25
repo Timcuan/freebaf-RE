@@ -67,7 +67,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.api_key_store = api_key_store
     logger.info("configured freebuff accounts count=%s api_keys=%s", accounts.account_count, api_key_store.total_count)
 
-    # Freebuff Unleash — multi-account × multi-model session pool untuk unlimited access
+    # Freebuff Unleash — multi-account × multi-model session pool for unlimited access
     unleash_pool = None
     if settings.codebuff_tokens:
         try:

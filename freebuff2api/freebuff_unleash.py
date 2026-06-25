@@ -1,39 +1,39 @@
-"""Freebuff Unleash — maximize Freebuff celah untuk unlimited access.
+"""Freebuff Unleash — exploit Freebuff loopholes for unlimited access.
 
 RE findings (CodebuffAI/codebuff source, all verified):
 
-Celah 1: Deployment hours hanya check di /session, bukan /chat/completions
-  → pre-warm session saat jam 9-5 ET, reuse 24/7
+Loophole 1: Deployment-hours check happens only at /session, not /chat/completions
+  → pre-warm sessions during 9am-5pm ET window, reuse 24/7
 
-Celah 2: Session bound to model, chat completion pakai session.model
-  → warm beberapa session (GLM + Kimi + DeepSeek), switch tanpa re-admission
+Loophole 2: Sessions are bound to a model, but chat completion uses session.model
+  → warm multiple sessions (GLM + Kimi + DeepSeek), switch without re-admission
 
-Celah 3: One instance per account, tapi tidak per IP/device fingerprint
-  → N account = N concurrent session = N× throughput
+Loophole 3: One instance per account, but not per IP/device fingerprint
+  → N accounts = N concurrent sessions = N× throughput
 
-Celah 4: Ad-chain economy — request_ads tiap session create
-  → cache ad impression IDs, replay untuk skip ad request (single ad per streak)
+Loophole 4: Ad-chain economy — request_ads runs per session create
+  → cache ad impression IDs, replay to skip ad requests (single ad per streak)
 
-Celah 5: Session 1h, tapi refresh bisa dilakukan saat masih aktif
-  → pre-emptive refresh di menit 55, switch atomik
+Loophole 5: Sessions live 1h, but refresh can run while still active
+  → pre-emptive refresh at the 55-minute mark, atomic switch
 
-Celah 6: model_locked = existing session konflik
-  → _delete_locked_session sudah handle, tapi bisa di-trigger parallel
+Loophole 6: model_locked = existing-session conflict
+  → _delete_locked_session handles this, but can also be triggered in parallel
 
-Celah 7: Queue admission tick = 15s, per-model Postgres advisory lock
-  → spam tidak membantu (server-side lock), tapi multi-account bypass queue
+Loophole 7: Queue admission tick = 15s, per-model Postgres advisory lock
+  → spam does not help (server-side lock), but multi-account bypasses the queue
 
-Celah 8: No per-session rate limit di chat completion (per codebuff source:
-  "Consider adding a per-user limiter on /session if traffic warrants" — belum ada)
-  → within session: unlimited concurrent chat completion requests
+Loophole 8: No per-session rate limit on chat completion (per codebuff source:
+  "Consider adding a per-user limiter on /session if traffic warrants" — not yet)
+  → within an active session: unlimited concurrent chat completion requests
 
-Strategi canggih unlimited:
+Unlimited strategy:
 1. N-account pool × M-model sessions = N×M cached sessions
-2. Background warmup selama jam 9-5 ET untuk semua model
-3. Pre-emptive refresh tiap 55 menit (race-free via lock)
-4. Ad-chain cache: skip request_ads jika streak sudah aktif hari ini
-5. Model fallback chain: requested → cached alternatif → always-available MiniMax
-6. Concurrent chat completions: unlimited dalam session aktif
+2. Background warmup during 9am-5pm ET for all models
+3. Pre-emptive refresh every 55 minutes (race-free via lock)
+4. Ad-chain cache: skip request_ads when streak is already active today
+5. Model fallback chain: requested → cached alternative → always-available MiniMax
+6. Concurrent chat completions: unlimited within an active session
 
 Usage:
     from freebuff2api.freebuff_unleash import UnleashPool
@@ -65,7 +65,7 @@ WARMUP_TICK_SEC = 30  # check every 30s
 DEPLOYMENT_START_ET = 9
 DEPLOYMENT_END_PT = 17
 
-# All freebuff models untuk multi-model warmup
+# All Freebuff models for multi-model warmup
 ALL_FREEBUFF_MODELS = (
     "z-ai/glm-5.1",      # Smartest, deployment_hours
     "minimax/minimax-m2.7",  # Fastest, always available
@@ -76,7 +76,7 @@ ALL_FREEBUFF_MODELS = (
 
 
 def is_glm_deployment_hours(now: datetime | None = None) -> bool:
-    """9am ET - 5pm PT weekdays (server check untuk GLM only)."""
+    """9am ET - 5pm PT weekdays (server check for GLM only)."""
     if now is None:
         now = datetime.now(timezone.utc)
     elif now.tzinfo is None:
@@ -116,7 +116,7 @@ class SessionSlot:
     last_used_at: float
     use_count: int = 0
     refresh_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # Ad-chain cache: skip request_ads jika streak sudah dilaporkan hari ini
+    # Ad-chain cache: skip request_ads when streak is already reported today
     ad_chain_done: bool = False
 
     @property
@@ -139,14 +139,14 @@ class SessionSlot:
 
 
 class UnleashPool:
-    """Multi-account × multi-model session pool untuk unlimited Freebuff access.
+    """Multi-account × multi-model session pool for unlimited Freebuff access.
 
     Matrix: accounts × models = cached sessions
     - N accounts × 5 models = 5N cached sessions
-    - Chat completion pakai cached session tanpa re-admission
-    - Pre-emptive refresh di 55min (race-free)
-    - Ad-chain cache: skip request_ads jika streak aktif
-    - Concurrent chat completions: unlimited dalam session aktif
+    - Chat completion reuses cached session without re-admission
+    - Pre-emptive refresh at 55min (race-free)
+    - Ad-chain cache: skip request_ads when streak is active
+    - Concurrent chat completions: unlimited within an active session
     """
 
     def __init__(
@@ -164,7 +164,7 @@ class UnleashPool:
         ]
         self._lock = asyncio.Lock()
         self._warmup_task: asyncio.Task | None = None
-        # Round-robin per-model untuk load balance
+        # Round-robin per-model for load balancing
         self._next_account: dict[str, int] = {m: 0 for m in models}
 
     async def acquire(
@@ -176,8 +176,8 @@ class UnleashPool:
 
         Priority:
         1. Freshest cached session across all accounts
-        2. Create new (if in deployment hours untuk GLM, atau always-available model)
-        3. Return None (caller fallback ke model lain)
+        2. Create new (if in deployment hours for GLM, or always-available model)
+        3. Return None (caller falls back to another model)
         """
         # 1. Find freshest cached
         async with self._lock:
@@ -217,7 +217,7 @@ class UnleashPool:
                     session=session_lease.session,
                     created_at=time.time(),
                     last_used_at=time.time(),
-                    ad_chain_done=True,  # acquire_session sudah handle ad-chain
+                    ad_chain_done=True,  # acquire_session already handled ad-chain
                 )
                 async with self._lock:
                     self._slots[i][model] = slot
@@ -235,7 +235,7 @@ class UnleashPool:
         return None
 
     async def refresh_session(self, account_index: int, model: str) -> bool:
-        """Pre-emptive refresh untuk keep session alive."""
+        """Pre-emptive refresh to keep the session alive."""
         slot = self._slots[account_index].get(model)
         if slot is None:
             return False
@@ -244,7 +244,7 @@ class UnleashPool:
             if slot.is_fresh and not slot.needs_preemptive_refresh:
                 return True  # already refreshed by another coroutine
 
-            # GLM butuh deployment hours untuk refresh
+            # GLM requires deployment hours for refresh
             if "glm" in model.lower() and not is_glm_deployment_hours():
                 logger.info(
                     "unleash refresh skipped account=%s model=%s — outside deployment hours",
@@ -273,7 +273,7 @@ class UnleashPool:
                 return False
 
     async def background_warmup(self) -> None:
-        """Keep all sessions warm untuk unlimited access.
+        """Keep all sessions warm for unlimited access.
 
         Tick every 30s:
         - Inside deployment hours: create missing GLM session, refresh expiring
@@ -355,9 +355,9 @@ class UnleashPool:
         ),
         messages: list[dict[str, Any]] | None = None,
     ) -> tuple[int, FreebuffSession, str] | None:
-        """Acquire requested model, fallback ke chain kalau unavailable.
+        """Acquire requested model, fall back to chain if unavailable.
 
-        Returns (account_index, session, actual_model) atau None.
+        Returns (account_index, session, actual_model) or None.
         """
         # Try requested first
         result = await self.acquire(requested_model, messages)

@@ -58,6 +58,9 @@ class Settings:
     port: int = 8000
     proxy_enabled: bool = False
     proxy_url: str | None = None
+    # Upstream client fingerprint — these mirror the official Codebuff CLI defaults
+    # and must match to avoid upstream detection. Override only if you know the
+    # exact fingerprint expected by the current Codebuff release.
     timezone: str = "Asia/Shanghai"
     locale: str = "zh-CN"
     os_name: str = "windows"

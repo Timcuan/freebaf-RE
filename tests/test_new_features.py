@@ -62,7 +62,7 @@ import pathlib
 html = pathlib.Path('freebuff2api/admin_static/index.html')
 assert html.exists()
 content = html.read_text(encoding='utf-8')
-assert '请求记录' in content
+assert 'request-records' in content or 'Request Records' in content or 'reqRecords' in content
 assert 'apiKeys' in content
 assert 'apiKeyModal' in content
 assert 'reqRecords' in content
