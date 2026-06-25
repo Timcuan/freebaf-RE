@@ -114,11 +114,14 @@ def load_fingerprint_store() -> dict[str, dict[str, Any]]:
 def save_fingerprint_store(store: dict[str, dict[str, Any]]) -> Path:
     path = fingerprint_store_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(store, indent=2), encoding="utf-8")
+    # Atomic write: temp file + rename to avoid corruption on crash.
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(store, indent=2), encoding="utf-8")
     try:
-        os.chmod(path, 0o600)
+        os.chmod(tmp, 0o600)
     except OSError:
         pass
+    os.replace(tmp, path)
     return path
 
 
@@ -143,16 +146,15 @@ def get_or_create_fingerprint(
     store = load_fingerprint_store() if persist else {}
     entry = store.get(account_id)
     if entry and is_valid_fingerprint(entry.get("fingerprint_id")):
-        entry["last_used_at"] = time.time()
-        if persist:
-            store[account_id] = entry
-            save_fingerprint_store(store)
+        # Reuse stored fingerprint — do NOT save on every call (I/O churn +
+        # corruption risk). last_used_at updated in memory only; persisted
+        # periodically or on create/rotate.
         return AccountFingerprint(
             account_id=account_id,
             fingerprint_id=entry["fingerprint_id"],
             user_agent=entry.get("user_agent") or ua,
             created_at=float(entry.get("created_at", 0)),
-            last_used_at=entry["last_used_at"],
+            last_used_at=time.time(),
         )
     fp = generate_legacy_fingerprint()
     now = time.time()

@@ -261,5 +261,56 @@ class DeadParamCleanupTests(unittest.TestCase):
         assert "cf_enabled" not in sig.parameters
 
 
+class AtomicWriteTests(unittest.TestCase):
+    """BUG #12, #14: fingerprint store + .env writes should be atomic (temp + rename)."""
+
+    def test_save_fingerprint_store_uses_atomic_write(self) -> None:
+        import inspect
+
+        from freebuff2api.stealth import save_fingerprint_store
+
+        source = inspect.getsource(save_fingerprint_store)
+        assert "os.replace" in source or "tmp" in source
+
+    def test_write_env_values_uses_atomic_write(self) -> None:
+        import inspect
+
+        from freebuff2api.config import write_env_values
+
+        source = inspect.getsource(write_env_values)
+        assert "os.replace" in source or "tmp" in source
+
+    def test_write_env_values_not_duplicated(self) -> None:
+        """BUG #15: write_env_values was defined twice — second shadowed first."""
+        import freebuff2api.config as cfg
+
+        # Python only keeps one definition; verify there's no duplicate
+        # by checking source file doesn't have 2 def lines
+        import inspect
+
+        source = inspect.getsource(cfg)
+        assert source.count("def write_env_values") == 1
+        assert source.count("def project_env_path") == 1
+
+
+class FingerprintReuseTests(unittest.TestCase):
+    """BUG #13: get_or_create_fingerprint should NOT save store on every reuse."""
+
+    def test_get_or_create_does_not_save_on_reuse(self) -> None:
+        import inspect
+
+        from freebuff2api.stealth import get_or_create_fingerprint
+
+        source = inspect.getsource(get_or_create_fingerprint)
+        # The reuse path should return without calling save_fingerprint_store
+        # Find the reuse branch (entry exists)
+        assert "is_valid_fingerprint" in source
+        # Verify the reuse path doesn't call save (only create path does)
+        reuse_section = source[source.index("if entry and is_valid_fingerprint"):]
+        create_section = reuse_section[reuse_section.index("fp = generate_legacy_fingerprint"):]
+        reuse_only = reuse_section[:reuse_section.index("fp = generate_legacy_fingerprint")]
+        assert "save_fingerprint_store" not in reuse_only
+
+
 if __name__ == "__main__":
     unittest.main()

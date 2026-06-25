@@ -222,34 +222,8 @@ def write_env_values(values: dict[str, str | None], env_path: Path | None = None
         if value is not None:
             output.append(f"{name}={value}")
 
-    path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
-
-
-def project_env_path() -> Path:
-    return Path(__file__).resolve().parents[1] / ".env"
-
-
-def write_env_values(values: dict[str, str | None], env_path: Path | None = None) -> None:
-    path = env_path or project_env_path()
-    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    pending = dict(values)
-    output: list[str] = []
-
-    for line in existing:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
-            output.append(line)
-            continue
-        name = line.split("=", 1)[0].strip()
-        if name in pending:
-            value = pending.pop(name)
-            if value is not None:
-                output.append(f"{name}={value}")
-            continue
-        output.append(line)
-
-    for name, value in pending.items():
-        if value is not None:
-            output.append(f"{name}={value}")
-
-    path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    # Atomic write: temp file + rename to avoid corruption on crash.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".env.tmp")
+    tmp.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    os.replace(tmp, path)
