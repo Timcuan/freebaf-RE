@@ -97,7 +97,7 @@ _MODEL_ALIASES["gemini-pro"] = "google/gemini-3.1-pro-preview"
 del _m
 
 
-def resolve_model(requested: str | None, cf_enabled: bool = False) -> FreebuffModel:
+def resolve_model(requested: str | None) -> FreebuffModel:
     """Resolve model by ID or alias (Freebuff-only)."""
     if not requested:
         return DEFAULT_MODEL
@@ -120,7 +120,7 @@ def resolve_model(requested: str | None, cf_enabled: bool = False) -> FreebuffMo
     raise ValueError(f"Unsupported Freebuff model: {requested}")
 
 
-def models_response(cf_enabled: bool = False) -> dict[str, object]:
+def models_response() -> dict[str, object]:
     return {
         "object": "list",
         "data": [

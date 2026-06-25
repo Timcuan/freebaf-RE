@@ -880,8 +880,10 @@ class CodebuffAccountPool:
         self,
         model: str,
         messages: list[dict[str, Any]] | None = None,
+        *,
+        preferred_index: int | None = None,
     ) -> CodebuffAccountLease:
-        account_index = await self._reserve_account()
+        account_index = await self._reserve_account(preferred_index=preferred_index)
         account = self._accounts[account_index]
         logger.info(
             "account reserved index=%s session_model=%s messages=%s",
@@ -920,9 +922,16 @@ class CodebuffAccountPool:
             self._accounts[account_index].busy = False
             self._condition.notify(1)
 
-    async def _reserve_account(self) -> int:
+    async def _reserve_account(self, *, preferred_index: int | None = None) -> int:
         async with self._condition:
             while True:
+                # If a preferred index is provided and that account is free, use it.
+                if preferred_index is not None:
+                    n = len(self._accounts)
+                    if 0 <= preferred_index < n and not self._accounts[preferred_index].busy:
+                        self._accounts[preferred_index].busy = True
+                        self._next_index = (preferred_index + 1) % n
+                        return preferred_index
                 account_index = self._next_available_index()
                 if account_index is not None:
                     self._accounts[account_index].busy = True

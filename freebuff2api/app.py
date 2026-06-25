@@ -410,10 +410,24 @@ async def chat_completions(request: Request) -> Any:
     messages = normalize_chat_messages(body.get("messages"))
     lease: CodebuffAccountLease | None = None
     try:
+        # Rate governor: jitter to break burst patterns + pick least-loaded account
+        governor = getattr(request.app.state, "rate_governor", None)
+        preferred_index: int | None = None
+        if governor is not None:
+            await governor.jitter_delay()
+            try:
+                preferred_index = await governor.pick_account()
+                if preferred_index < 0:
+                    preferred_index = None
+            except Exception:
+                preferred_index = None
         lease = await _accounts(request).acquire_session(
             model_config.session_id,
             messages=messages,
+            preferred_index=preferred_index,
         )
+        if governor is not None and lease._account_index is not None:
+            await governor.record_request(lease._account_index)
         client = lease.client
         await client.request_ad_chain(
             messages=messages,
@@ -502,6 +516,7 @@ async def _stream_openai_chunks(
     message_id: str | None = None
     client = client or (account_lease.client if account_lease else _client(request))
     settings = _settings(request)
+    errored = False
     try:
         async for line in client.chat_events(payload):
             data = decode_sse_data(line)
@@ -532,6 +547,7 @@ async def _stream_openai_chunks(
                     render_debug(data, settings.log_body_chars),
                 )
     except CodebuffError as error:
+        errored = True
         logger.warning(
             "chat stream failed run_id=%s: %s",
             run.run_id,
@@ -552,7 +568,7 @@ async def _stream_openai_chunks(
         )
         yield encode_sse("[DONE]")
     finally:
-        if api_key:
+        if api_key and not errored:
             duration_ms = int((time.time() - started) * 1000)
             _record_request(request, api_key, payload.get("model", ""), duration_ms, "success")
         _schedule_finalize_run(client, run, message_id)
