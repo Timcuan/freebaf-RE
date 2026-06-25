@@ -34,6 +34,31 @@ class CodebuffError(RuntimeError):
         self.status_code = status_code
 
 
+class RateLimitedError(CodebuffError):
+    """Raised when POST /session returns 429 `rate_limited`.
+
+    Carries the upstream pool (`period`), reset timestamp, and retry hint so
+    the caller can mark the account exhausted and pick another.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        pool: str = "",
+        model: str = "",
+        limit: int = 0,
+        reset_at: float | None = None,
+        retry_after_ms: int = 0,
+    ) -> None:
+        super().__init__(message, 429)
+        self.pool = pool
+        self.model = model
+        self.limit = limit
+        self.reset_at = reset_at
+        self.retry_after_ms = retry_after_ms
+
+
 @dataclass
 class FreebuffSession:
     instance_id: str
@@ -151,6 +176,8 @@ class CodebuffClient:
                 render_debug(response.text, self.settings.log_body_chars),
             )
         if response.status_code >= 400:
+            if path.startswith("/api/v1/freebuff/session"):
+                raise _upstream_session_error(response)
             raise _upstream_error(response)
         if not response.content:
             return {}
@@ -214,8 +241,29 @@ class CodebuffClient:
             "/api/v1/freebuff/session",
             headers=self._headers(extra={"x-freebuff-model": model}),
         )
-        if data.get("status") == "queued":
+        status = data.get("status")
+        if status == "queued":
             return await self._wait_for_active_session(data, model)
+        if status == "banned":
+            raise CodebuffError("Freebuff account banned", 403)
+        if status == "country_blocked":
+            raise CodebuffError(
+                f"Freebuff country blocked: {data.get('countryBlockReason') or 'unknown'}",
+                451,
+            )
+        if status == "model_unavailable":
+            raise CodebuffError(
+                f"Freebuff model unavailable: {data.get('requestedModel') or model} "
+                f"(available_hours={data.get('availableHours')})",
+                503,
+            )
+        if status == "model_locked":
+            # Caller should DELETE + retry. Surface as a recoverable error.
+            raise CodebuffError(
+                f"Freebuff model_locked: current={data.get('currentModel')} "
+                f"requested={data.get('requestedModel') or model}",
+                409,
+            )
         return self._session_from_data(data, model)
 
     def _session_from_data(
@@ -870,6 +918,48 @@ def _upstream_error(
         f"{prefix}: {response.status_code} {text}",
         502,
     )
+
+
+def _upstream_session_error(
+    response: httpx.Response,
+    *,
+    body: bytes | None = None,
+    prefix: str = "Codebuff session failed",
+) -> CodebuffError:
+    """Like _upstream_error but specialises 429 rate_limited for /session."""
+    raw_text = (
+        body.decode("utf-8", errors="replace")
+        if body is not None
+        else response.text
+    )
+    text = raw_text[:500]
+    if response.status_code == 429:
+        try:
+            data = (
+                response.json()
+                if body is None
+                else httpx.Response(
+                    response.status_code,
+                    content=body,
+                    headers=response.headers,
+                ).json()
+            )
+        except ValueError:
+            data = {}
+        if data.get("status") == "rate_limited":
+            from .account_health import parse_rate_limited
+            info = parse_rate_limited(data)
+            return RateLimitedError(
+                f"Freebuff session rate_limited model={info['model']} "
+                f"pool={info['pool']} limit={info['limit']} "
+                f"reset_at={info['reset_at']} recent_count={info['recent_count']}",
+                pool=info["pool"],
+                model=info["model"],
+                limit=info["limit"],
+                reset_at=info["reset_at"],
+                retry_after_ms=info["retry_after_ms"],
+            )
+    return _upstream_error(response, body=body, prefix=prefix)
 
 
 def _ad_messages(messages: list[dict[str, Any]] | None) -> list[dict[str, str]]:
