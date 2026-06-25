@@ -78,6 +78,11 @@ class Settings:
     cf_api_tokens: str | None = None
     cf_neuron_budget_daily: int = 9000
     cf_fallback_to_codebuff: bool = True
+    # Z.ai (GLM-4.7-Flash free tanpa batas + GLM 5.2 via 20M free token pool per account)
+    zai_api_keys: str | None = None
+    zai_default_model: str = "glm-4.7-flash"
+    zai_glm52_budget_tokens: int = 20_000_000
+    zai_fallback_to_codebuff: bool = True
 
     @property
     def codebuff_api_url(self) -> str:
@@ -195,6 +200,10 @@ def load_settings() -> Settings:
         cf_api_tokens=os.getenv("FREEBUFF_CF_API_TOKENS") or os.getenv("CF_API_TOKENS"),
         cf_neuron_budget_daily=int(os.getenv("FREEBUFF_CF_NEURON_BUDGET_DAILY", "9000")),
         cf_fallback_to_codebuff=_bool("FREEBUFF_CF_FALLBACK_TO_CODEBUFF", True),
+        zai_api_keys=os.getenv("FREEBUFF_ZAI_API_KEYS") or os.getenv("ZAI_API_KEYS"),
+        zai_default_model=os.getenv("FREEBUFF_ZAI_DEFAULT_MODEL", "glm-4.7-flash"),
+        zai_glm52_budget_tokens=int(os.getenv("FREEBUFF_ZAI_GLM52_BUDGET_TOKENS", "20000000")),
+        zai_fallback_to_codebuff=_bool("FREEBUFF_ZAI_FALLBACK_TO_CODEBUFF", True),
     )
 
 

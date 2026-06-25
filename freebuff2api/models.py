@@ -81,10 +81,20 @@ GEMINI_FREE_MODELS: tuple[FreebuffModel, ...] = (
 
 ALL_MODELS = FREEBUFF_MODELS + GEMINI_FREE_MODELS
 
-# Cloudflare Workers AI free models (10k neurons/day per account)
+# Cloudflare Workers AI free models
+# Verified costs (CF pricing page, 2026-06-26):
+# - GLM 5.2: 127k input / 400k output neurons per M tokens → NOT free-viable
+#   (10k free neurons/day = ~78 input tokens only)
+# - GLM 4.7-flash: 5.5k / 36.4k neurons per M → free-viable (~1.8M in / 275k out per day)
+# - Llama 3.2 1b: 2.5k / 18.3k → free-viable (~4M in / 547k out per day)
+# - Qwen3 30b fp8: 4.6k / 30.5k → free-viable
+# - gpt-oss-20b: 18.2k / 27.3k → free-viable
+# - gemma-4-26b: 9.1k / 27.3k → free-viable
+# - granite-4.0-h-micro: 1.5k / 10.2k → free-viable (cheapest)
 # Available when FREEBUFF_CF_ACCOUNT_IDS + FREEBUFF_CF_API_TOKENS configured.
-# Routing: provider="cloudflare" bypasses Codebuff deployment-hours entirely.
 CLOUDFLARE_FREE_MODELS: tuple[FreebuffModel, ...] = (
+    # GLM 5.2 — berbayar di CF (Worker Paid $0.011/1k neurons above 10k free)
+    # Free tier hanya cukup ~78 input tokens. Use only if you have Workers Paid.
     FreebuffModel(
         "cf/glm-5.2", "cf-zai-glm-5-2", owned_by="cloudflare",
         upstream_model_id="@cf/zai-org/glm-5.2", provider="cloudflare",
@@ -93,13 +103,72 @@ CLOUDFLARE_FREE_MODELS: tuple[FreebuffModel, ...] = (
         "cf/glm-5.2-fp8", "cf-zai-glm-5-2-fp8", owned_by="cloudflare",
         upstream_model_id="@cf/zai-org/glm-5.2-fp8", provider="cloudflare",
     ),
+    # GLM 4.7-flash — free-viable (5.5k/36.4k neurons per M tokens)
+    FreebuffModel(
+        "cf/glm-4.7-flash", "cf-zai-glm-4-7-flash", owned_by="cloudflare",
+        upstream_model_id="@cf/zai-org/glm-4.7-flash", provider="cloudflare",
+    ),
+    # Cheaper free-viable models
+    FreebuffModel(
+        "cf/llama-3.2-1b", "cf-meta-llama-3-2-1b", owned_by="cloudflare",
+        upstream_model_id="@cf/meta/llama-3.2-1b-instruct", provider="cloudflare",
+    ),
+    FreebuffModel(
+        "cf/qwen3-30b", "cf-qwen3-30b-a3b-fp8", owned_by="cloudflare",
+        upstream_model_id="@cf/qwen/qwen3-30b-a3b-fp8", provider="cloudflare",
+    ),
+    FreebuffModel(
+        "cf/gpt-oss-20b", "cf-openai-gpt-oss-20b", owned_by="cloudflare",
+        upstream_model_id="@cf/openai/gpt-oss-20b", provider="cloudflare",
+    ),
+    FreebuffModel(
+        "cf/gemma-4-26b", "cf-google-gemma-4-26b", owned_by="cloudflare",
+        upstream_model_id="@cf/google/gemma-4-26b-a4b-it", provider="cloudflare",
+    ),
+    FreebuffModel(
+        "cf/granite-4.0-micro", "cf-ibm-granite-4-0-micro", owned_by="cloudflare",
+        upstream_model_id="@cf/ibm-granite/granite-4.0-h-micro", provider="cloudflare",
+    ),
+)
+
+# Z.ai models — free + paid (via 20M free token pool per account)
+# GLM-4.7-Flash = FREE tanpa batas (input/cached/output semua gratis)
+# GLM-4.5-Flash = FREE tanpa batas
+# GLM-5.2 = $1.40/M in + $4.40/M out (berbayar, tapi 20M token free per new account)
+ZAI_FREE_MODELS_TUPLE: tuple[FreebuffModel, ...] = (
+    # FREE tanpa batas — coding agent default
+    FreebuffModel(
+        "zai/glm-4.7-flash", "zai-glm-4-7-flash", owned_by="zai",
+        upstream_model_id="glm-4.7-flash", provider="zai",
+    ),
+    FreebuffModel(
+        "zai/glm-4.5-flash", "zai-glm-4-5-flash", owned_by="zai",
+        upstream_model_id="glm-4.5-flash", provider="zai",
+    ),
+)
+
+ZAI_PAID_MODELS_TUPLE: tuple[FreebuffModel, ...] = (
+    # Berbayar tapi 20M token free per new account → pool rotation
+    FreebuffModel(
+        "zai/glm-5.2-paid", "zai-glm-5-2-paid", owned_by="zai",
+        upstream_model_id="glm-5.2", provider="zai",
+    ),
+    FreebuffModel(
+        "zai/glm-5.1-paid", "zai-glm-5-1-paid", owned_by="zai",
+        upstream_model_id="glm-5.1", provider="zai",
+    ),
+    FreebuffModel(
+        "zai/glm-4.7-flashx", "zai-glm-4-7-flashx", owned_by="zai",
+        upstream_model_id="glm-4.7-flashx", provider="zai",
+    ),
 )
 
 def all_models_with_cf(cf_enabled: bool = False) -> tuple[FreebuffModel, ...]:
-    """Return all models, optionally including Cloudflare free variants."""
+    """Return all models, optionally including Cloudflare + Z.ai variants."""
+    base = ALL_MODELS + CLOUDFLARE_FREE_MODELS + ZAI_FREE_MODELS_TUPLE
     if cf_enabled:
-        return ALL_MODELS + CLOUDFLARE_FREE_MODELS
-    return ALL_MODELS
+        return base + ZAI_PAID_MODELS_TUPLE
+    return base
 
 # Alias map: normalized (lowercase, no slash) -> canonical model id
 _MODEL_ALIASES: dict[str, str] = {}
@@ -123,8 +192,11 @@ del _m
 
 
 def resolve_model(requested: str | None, cf_enabled: bool = False) -> FreebuffModel:
-    """Resolve model by ID or alias. If cf_enabled, include Cloudflare variants."""
-    pool = all_models_with_cf(cf_enabled) if cf_enabled else ALL_MODELS
+    """Resolve model by ID or alias. If cf_enabled, include paid Z.ai variants."""
+    # Z.ai free models always available; paid only when cf_enabled (any external provider configured)
+    pool = all_models_with_cf(cf_enabled)
+    # If cf_enabled is False but ZAI is configured, still include free Z.ai models
+    # all_models_with_cf already includes ZAI_FREE_MODELS_TUPLE unconditionally
 
     if not requested:
         return DEFAULT_MODEL

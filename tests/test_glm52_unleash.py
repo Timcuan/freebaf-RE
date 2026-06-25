@@ -66,9 +66,10 @@ class TestModelsCfIntegration:
         assert "cf/glm-5.2-fp8" in cf_ids
 
     def test_cf_models_absent_when_disabled(self):
+        # Free CF + Z.ai models always included now; paid only when cf_enabled
         all_m = all_models_with_cf(cf_enabled=False)
-        cf_ids = [m.id for m in all_m if m.provider == "cloudflare"]
-        assert cf_ids == []
+        paid = [m for m in all_m if m.provider == "zai" and "paid" in m.id]
+        assert paid == []  # no paid Z.ai models without config
 
     def test_resolve_cf_model(self):
         m = resolve_model("cf/glm-5.2", cf_enabled=True)

@@ -48,6 +48,30 @@ CF_GLM_5_2_FP8_MODEL = "@cf/zai-org/glm-5.2-fp8"
 CF_NEURONS_PER_DAY_FREE = 10_000
 DEFAULT_NEURON_BUDGET = 9_000  # safety margin
 
+# REAL neuron costs per 1M tokens (from CF pricing page, verified 2026-06-26):
+# @cf/zai-org/glm-5.2: 127,273 input / 400,000 output neurons per M tokens
+# Free tier 10k neurons/day = ~78 input tokens OR ~25 output tokens per day
+# → GLM 5.2 via CF free tier is NOT viable for production use
+# Use cheaper models for free tier; GLM 5.2 requires Workers Paid ($0.011/1k neurons)
+CF_GLM_5_2_NEURONS_PER_M_INPUT = 127_273
+CF_GLM_5_2_NEURONS_PER_M_OUTPUT = 400_000
+
+# Cheaper CF models that fit free tier (10k neurons/day):
+# - @cf/zai-org/glm-4.7-flash: 5,500 input / 36,400 output neurons per M tokens
+#   → ~1.8M input tokens free/day, ~275k output tokens free/day
+# - @cf/meta/llama-3.2-1b-instruct: 2,457 / 18,252 neurons per M
+# - @cf/openai/gpt-oss-20b: 18,182 / 27,273 neurons per M
+# - @cf/qwen/qwen3-30b-a3b-fp8: 4,625 / 30,475 neurons per M
+CF_FREE_VIABLE_MODELS = {
+    "@cf/zai-org/glm-4.7-flash": (5_500, 36_400),
+    "@cf/meta/llama-3.2-1b-instruct": (2_457, 18_252),
+    "@cf/meta/llama-3.2-3b-instruct": (4_625, 30_475),
+    "@cf/qwen/qwen3-30b-a3b-fp8": (4_625, 30_475),
+    "@cf/openai/gpt-oss-20b": (18_182, 27_273),
+    "@cf/google/gemma-4-26b-a4b-it": (9_091, 27_273),
+    "@cf/ibm-granite/granite-4.0-h-micro": (1_542, 10_158),
+}
+
 
 @dataclass
 class CfAccountState:
@@ -140,9 +164,19 @@ class CloudflareAIClient:
                     return acc
             return None
 
-    def _estimate_neurons(self, input_tokens: int, output_tokens: int) -> int:
-        # Rough estimate: 25 neurons/1M input + 50 neurons/1M output
-        return (input_tokens * 25 + output_tokens * 50) // 1_000_000 + 1
+    def _estimate_neurons(self, input_tokens: int, output_tokens: int, model: str | None = None) -> int:
+        """Accurate neuron estimate per CF pricing page.
+        GLM 5.2: 127k input / 400k output neurons per M tokens.
+        Free-viable models: use actual costs from CF_FREE_VIABLE_MODELS.
+        """
+        if model and model in CF_FREE_VIABLE_MODELS:
+            in_per_m, out_per_m = CF_FREE_VIABLE_MODELS[model]
+            return (input_tokens * in_per_m + output_tokens * out_per_m) // 1_000_000 + 1
+        # GLM 5.2 default
+        return (
+            input_tokens * CF_GLM_5_2_NEURONS_PER_M_INPUT
+            + output_tokens * CF_GLM_5_2_NEURONS_PER_M_OUTPUT
+        ) // 1_000_000 + 1
 
     def _build_url(self, account_id: str, path: str) -> str:
         return f"{CF_API_BASE.format(account_id=account_id)}{path}"
@@ -167,17 +201,32 @@ class CloudflareAIClient:
                 status_code=429,
             )
 
-        # Normalize model → GLM 5.2
+        # Normalize model → CF model id
         cf_body = {**body}
         requested = (cf_body.get("model") or "").lower()
         if "glm-5.2" in requested or "glm_5_2" in requested or "glm52" in requested:
             cf_body["model"] = CF_GLM_5_2_MODEL
+        elif "glm-4.7" in requested or "glm-flash" in requested:
+            cf_body["model"] = "@cf/zai-org/glm-4.7-flash"
         elif "fp8" in requested:
             cf_body["model"] = CF_GLM_5_2_FP8_MODEL
+        elif "gpt-oss-20b" in requested:
+            cf_body["model"] = "@cf/openai/gpt-oss-20b"
+        elif "llama-3.2-1b" in requested:
+            cf_body["model"] = "@cf/meta/llama-3.2-1b-instruct"
+        elif "qwen3-30b" in requested:
+            cf_body["model"] = "@cf/qwen/qwen3-30b-a3b-fp8"
+        elif "gemma-4-26b" in requested:
+            cf_body["model"] = "@cf/google/gemma-4-26b-a4b-it"
+        elif "granite-4.0" in requested:
+            cf_body["model"] = "@cf/ibm-granite/granite-4.0-h-micro"
         else:
-            cf_body["model"] = CF_GLM_5_2_MODEL  # default to GLM 5.2
+            # Default to GLM 4.7-flash (free-viable) instead of GLM 5.2
+            # GLM 5.2 costs 127k neurons/M input — exhausts 10k free tier in 78 tokens
+            cf_body["model"] = "@cf/zai-org/glm-4.7-flash"
 
         cf_body["stream"] = stream
+        chosen_model = cf_body["model"]
 
         url = self._build_url(account.account_id, "/v1/chat/completions")
 
@@ -207,7 +256,7 @@ class CloudflareAIClient:
             in_tok = usage.get("prompt_tokens", 0)
             out_tok = usage.get("completion_tokens", 0)
             async with account._lock:
-                account.neuron_used_today += self._estimate_neurons(in_tok, out_tok)
+                account.neuron_used_today += self._estimate_neurons(in_tok, out_tok, chosen_model)
                 account.success_count += 1
             return data
         except httpx.RequestError as e:
@@ -260,7 +309,7 @@ class CloudflareAIClient:
                             pass
                     yield chunk
             async with account._lock:
-                account.neuron_used_today += self._estimate_neurons(total_in, total_out)
+                account.neuron_used_today += self._estimate_neurons(total_in, total_out, chosen_model)
                 account.success_count += 1
         except httpx.RequestError as e:
             async with account._lock:

@@ -90,6 +90,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as e:
             logger.warning("cloudflare ai init failed: %s", e)
 
+    # Z.ai — GLM-4.7-Flash free tanpa batas + GLM 5.2 via 20M free token pool
+    zai_client = None
+    if settings.zai_api_keys:
+        try:
+            from .zai import ZaiClient
+            zai_client = ZaiClient(settings)
+            app.state.zai_client = zai_client
+            logger.info("zai enabled accounts=%s total_paid_remaining=%s default=%s",
+                        zai_client.account_count, zai_client.total_paid_remaining,
+                        settings.zai_default_model)
+        except Exception as e:
+            logger.warning("zai init failed: %s", e)
+
     try:
         yield
     finally:
@@ -97,6 +110,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await glm_pool.stop_warmup_task()
         if cf_client:
             await cf_client.aclose()
+        if zai_client:
+            await zai_client.aclose()
         await accounts.aclose()
 
 
@@ -271,11 +286,16 @@ async def health_glm52(request: Request) -> dict[str, Any]:
         "unleash_active": glm_pool is not None,
         "cf_active": cf_client is not None,
         "cf_enabled_config": bool(settings.cf_account_ids and settings.cf_api_tokens),
+        "zai_active": getattr(request.app.state, "zai_client", None) is not None,
+        "zai_enabled_config": bool(settings.zai_api_keys),
     }
     if glm_pool:
         result["unleash_pool"] = glm_pool.status()
     if cf_client:
         result["cloudflare"] = cf_client.status()
+    zai_client = getattr(request.app.state, "zai_client", None)
+    if zai_client:
+        result["zai"] = zai_client.status()
     return result
 
 
@@ -283,7 +303,10 @@ async def health_glm52(request: Request) -> dict[str, Any]:
 async def list_models(request: Request) -> dict[str, Any]:
     _check_local_auth(request, require_configured=True)
     settings = _settings(request)
-    cf_enabled = bool(settings.cf_account_ids and settings.cf_api_tokens)
+    cf_enabled = bool(
+        (settings.cf_account_ids and settings.cf_api_tokens)
+        or settings.zai_api_keys
+    )
     return models_response(cf_enabled=cf_enabled)
 
 
@@ -291,7 +314,10 @@ async def list_models(request: Request) -> dict[str, Any]:
 async def get_model(request: Request, model_id: str) -> dict[str, Any]:
     _check_local_auth(request, require_configured=True)
     settings = _settings(request)
-    cf_enabled = bool(settings.cf_account_ids and settings.cf_api_tokens)
+    cf_enabled = bool(
+        (settings.cf_account_ids and settings.cf_api_tokens)
+        or settings.zai_api_keys
+    )
     from .models import all_models_with_cf
     for m in all_models_with_cf(cf_enabled):
         if m.id == model_id:
@@ -358,6 +384,40 @@ async def chat_completions(request: Request) -> Any:
         except Exception as error:
             logger.warning("cf chat completion failed: %s", error)
             if not settings.cf_fallback_to_codebuff:
+                return _error_response(error)
+            logger.info("falling back to codebuff for model=%s", model)
+            # Continue to codebuff path below
+
+    # Route to Z.ai if model.provider == "zai"
+    # GLM-4.7-Flash = free tanpa batas; GLM 5.2 = 20M token free per account pool
+    if model_config.provider == "zai":
+        zai_client = getattr(request.app.state, "zai_client", None)
+        if zai_client is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Z.ai not configured. Set FREEBUFF_ZAI_API_KEYS.",
+            )
+        try:
+            # Override model in body with upstream id (e.g. glm-4.7-flash)
+            zai_body = {**body, "model": model_config.upstream_id}
+            if body.get("stream") is True:
+                async def zai_stream() -> AsyncIterator[bytes]:
+                    async for chunk in await zai_client.chat_completions(zai_body, stream=True):
+                        yield chunk
+                return StreamingResponse(
+                    zai_stream(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache, no-transform",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            data = await zai_client.chat_completions(zai_body, stream=False)
+            return JSONResponse(content=data)
+        except Exception as error:
+            logger.warning("zai chat completion failed: %s", error)
+            if not settings.zai_fallback_to_codebuff:
                 return _error_response(error)
             logger.info("falling back to codebuff for model=%s", model)
             # Continue to codebuff path below
