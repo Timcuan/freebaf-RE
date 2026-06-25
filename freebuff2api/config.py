@@ -73,16 +73,6 @@ class Settings:
     # CLI version externalization (was hardcoded Bun/1.3.11)
     cli_user_agent: str = "Bun/1.3.11"
     freebuff_cli_user_agent: str = "Freebuff-CLI/0.0.105"
-    # Cloudflare Workers AI (free GLM 5.2 — 10k neurons/day per account)
-    cf_account_ids: str | None = None
-    cf_api_tokens: str | None = None
-    cf_neuron_budget_daily: int = 9000
-    cf_fallback_to_codebuff: bool = True
-    # Z.ai (GLM-4.7-Flash free tanpa batas + GLM 5.2 via 20M free token pool per account)
-    zai_api_keys: str | None = None
-    zai_default_model: str = "glm-4.7-flash"
-    zai_glm52_budget_tokens: int = 20_000_000
-    zai_fallback_to_codebuff: bool = True
 
     @property
     def codebuff_api_url(self) -> str:
@@ -196,14 +186,6 @@ def load_settings() -> Settings:
         deploy_mode=os.getenv("FREEBUFF_DEPLOY_MODE") or _detect_deploy_mode(),
         cli_user_agent=os.getenv("FREEBUFF_CLI_USER_AGENT", "Bun/1.3.11"),
         freebuff_cli_user_agent=os.getenv("FREEBUFF_FREEBUFF_CLI_USER_AGENT", "Freebuff-CLI/0.0.105"),
-        cf_account_ids=os.getenv("FREEBUFF_CF_ACCOUNT_IDS") or os.getenv("CF_ACCOUNT_IDS"),
-        cf_api_tokens=os.getenv("FREEBUFF_CF_API_TOKENS") or os.getenv("CF_API_TOKENS"),
-        cf_neuron_budget_daily=int(os.getenv("FREEBUFF_CF_NEURON_BUDGET_DAILY", "9000")),
-        cf_fallback_to_codebuff=_bool("FREEBUFF_CF_FALLBACK_TO_CODEBUFF", True),
-        zai_api_keys=os.getenv("FREEBUFF_ZAI_API_KEYS") or os.getenv("ZAI_API_KEYS"),
-        zai_default_model=os.getenv("FREEBUFF_ZAI_DEFAULT_MODEL", "glm-4.7-flash"),
-        zai_glm52_budget_tokens=int(os.getenv("FREEBUFF_ZAI_GLM52_BUDGET_TOKENS", "20000000")),
-        zai_fallback_to_codebuff=_bool("FREEBUFF_ZAI_FALLBACK_TO_CODEBUFF", True),
     )
 
 
