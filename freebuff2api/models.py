@@ -29,21 +29,14 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
     FreebuffModel("minimax/minimax-m3", "base2-free-minimax-m3"),
     FreebuffModel("mimo/mimo-v2.5", "base2-free-mimo"),
     FreebuffModel("mimo/mimo-v2.5-pro", "base2-free-mimo-pro"),
-    # GLM 5.1 — free tier, deployment hours 9am ET-5pm PT weekdays
-    # Upstream auto-routes GLM-5.1 -> GLM-5.2 per Z.AI docs (1M context, 3x peak / 2x off-peak quota)
-    # Upstream agent_id: base2-free (root orchestrator allows glm-5.1)
-    FreebuffModel("zai/glm-5.1", "base2-free-glm-5-1", owned_by="zai",
-                  upstream_model_id="z-ai/glm-5.1"),
-    FreebuffModel("zai/glm-5.2", "base2-free-glm-5-1", owned_by="zai",
-                  upstream_model_id="z-ai/glm-5.1"),
-    # Common alias forms clients may send
-    FreebuffModel("z-ai/glm-5.1", "base2-free-glm-5-1", owned_by="zai"),
-    FreebuffModel("z-ai/glm-5.2", "base2-free-glm-5-1", owned_by="zai",
-                  upstream_model_id="z-ai/glm-5.1"),
-    FreebuffModel("glm-5.2", "base2-free-glm-5-1", owned_by="zai",
-                  upstream_model_id="z-ai/glm-5.1"),
-    FreebuffModel("glm-5.1", "base2-free-glm-5-1", owned_by="zai",
-                  upstream_model_id="z-ai/glm-5.1"),
+    # GLM 5.2 (Z.ai) — referral-gated weekly pool (5 sessions/referral/week, cap 10).
+    # Availability is 'always' upstream; the gate is the referral session pool,
+    # not deployment hours. Bypassed by Freebuff Unleash via session persistence.
+    # Upstream agent_id: base2-free-glm (uses FREEBUFF_GLM_V52_MODEL_ID = z-ai/glm-5.2)
+    FreebuffModel("z-ai/glm-5.2", "base2-free-glm", owned_by="zai"),
+    # Short alias clients may send
+    FreebuffModel("glm-5.2", "base2-free-glm", owned_by="zai",
+                  upstream_model_id="z-ai/glm-5.2"),
 )
 
 DEFAULT_MODEL = FREEBUFF_MODELS[0]

@@ -17,20 +17,19 @@ from freebuff2api.models import (
 
 
 class ModelAliasTests(unittest.TestCase):
-    def test_glm_5_1_registered(self) -> None:
+    def test_glm_5_2_registered(self) -> None:
         ids = {m.id for m in ALL_MODELS}
-        self.assertIn("zai/glm-5.1", ids)
-        self.assertIn("zai/glm-5.2", ids)
+        self.assertIn("z-ai/glm-5.2", ids)
 
-    def test_glm_5_2_resolves_to_glm_5_1_upstream(self) -> None:
-        m = resolve_model("zai/glm-5.2")
-        self.assertEqual(m.upstream_model_id, "z-ai/glm-5.1")
-        self.assertEqual(m.agent_id, "base2-free-glm-5-1")
+    def test_glm_5_2_resolves_to_correct_agent(self) -> None:
+        m = resolve_model("z-ai/glm-5.2")
+        self.assertEqual(m.id, "z-ai/glm-5.2")
+        self.assertEqual(m.agent_id, "base2-free-glm")
 
-    def test_z_ai_alias_resolves(self) -> None:
-        # Codebuff CLI uses z-ai/ prefix
-        m = resolve_model("z-ai/glm-5.1")
-        self.assertEqual(m.id, "z-ai/glm-5.1")
+    def test_glm_short_alias_resolves(self) -> None:
+        m = resolve_model("glm-5.2")
+        self.assertEqual(m.upstream_model_id, "z-ai/glm-5.2")
+        self.assertEqual(m.agent_id, "base2-free-glm")
 
     def test_short_alias_resolves(self) -> None:
         m = resolve_model("glm-5.2")
@@ -57,8 +56,8 @@ class ModelAliasTests(unittest.TestCase):
         self.assertEqual(m.id, "deepseek/deepseek-v4-flash")
 
     def test_all_models_count(self) -> None:
-        # 7 original freebuff + 6 GLM aliases + 3 gemini = 16
-        self.assertGreaterEqual(len(ALL_MODELS), 16)
+        # 7 freebuff models (deepseek×2, kimi, minimax×2, mimo×2) + 2 GLM (z-ai/glm-5.2, glm-5.2) + 3 gemini = 12
+        self.assertGreaterEqual(len(ALL_MODELS), 12)
 
 
 class EgressProxyPriorityTests(unittest.TestCase):

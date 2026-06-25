@@ -53,51 +53,50 @@ class TestNextWindow:
 class TestModels:
     def test_all_freebuff_models_tracked(self):
         # Pool tracks the 5 freebuff models
-        assert "z-ai/glm-5.1" in ALL_FREEBUFF_MODELS
+        assert "z-ai/glm-5.2" in ALL_FREEBUFF_MODELS
         assert "minimax/minimax-m2.7" in ALL_FREEBUFF_MODELS
         assert "moonshotai/kimi-k2.6" in ALL_FREEBUFF_MODELS
         assert "deepseek/deepseek-v4-pro" in ALL_FREEBUFF_MODELS
 
-    def test_glm_5_2_alias_resolves_to_glm_5_1_upstream(self):
-        m = resolve_model("zai/glm-5.2")
-        assert m.upstream_model_id == "z-ai/glm-5.1"
-        assert m.agent_id == "base2-free-glm-5-1"
+    def test_glm_5_2_resolves_to_correct_agent(self):
+        m = resolve_model("z-ai/glm-5.2")
+        assert m.id == "z-ai/glm-5.2"
+        assert m.agent_id == "base2-free-glm"
 
-    def test_z_ai_alias_resolves(self):
-        m = resolve_model("z-ai/glm-5.1")
-        assert m.id == "z-ai/glm-5.1"
+    def test_glm_short_alias_resolves(self):
+        m = resolve_model("glm-5.2")
+        assert m.upstream_model_id == "z-ai/glm-5.2"
+        assert m.agent_id == "base2-free-glm"
 
     def test_no_external_providers(self):
-        # Freebuff-only — no CF/Zai API providers (zai/glm-5.1 is a Freebuff alias
-        # for the Z.AI model served via Codebuff, not a direct Z.ai API call)
+        # Freebuff-only — no CF/Zai API providers
         assert not any(m.id.startswith("cf/") for m in ALL_MODELS)
-        # zai/glm-* are Freebuff aliases, not external Z.ai API routing
-        zai_models = [m for m in ALL_MODELS if m.id.startswith("zai/")]
-        for m in zai_models:
-            # All should be owned by Freebuff/codebuff, served via Codebuff unleash
-            assert m.owned_by in ("zai", "freebuff")
+        # All GLM models are Freebuff aliases served via Codebuff unleash
+        glm_models = [m for m in ALL_MODELS if "glm" in m.id]
+        for m in glm_models:
+            assert m.owned_by == "zai"
+            assert m.agent_id == "base2-free-glm"
 
 
 class TestSessionSlot:
     def test_fresh_session(self):
         session = FreebuffSession(
-            instance_id="x", model="z-ai/glm-5.1", remaining_ms=3_600_000,
+            instance_id="x", model="z-ai/glm-5.2", remaining_ms=3_600_000,
         )
         slot = SessionSlot(
-            account_index=0, model="z-ai/glm-5.1", session=session,
+            account_index=0, model="z-ai/glm-5.2", session=session,
             created_at=_time.time(), last_used_at=_time.time(),
         )
         assert slot.is_fresh is True
-        # 3.6M ms remaining > 5M preemptive threshold? No, so no refresh needed yet
-        # Actually 3.6M < 5M, so needs_preemptive_refresh IS True
+        # 3.6M ms remaining < 5M preemptive threshold, so refresh needed
         assert slot.needs_preemptive_refresh is True
 
     def test_expiring_session(self):
         session = FreebuffSession(
-            instance_id="x", model="z-ai/glm-5.1", remaining_ms=60_000,
+            instance_id="x", model="z-ai/glm-5.2", remaining_ms=60_000,
         )
         slot = SessionSlot(
-            account_index=0, model="z-ai/glm-5.1", session=session,
+            account_index=0, model="z-ai/glm-5.2", session=session,
             created_at=_time.time(), last_used_at=_time.time(),
         )
         assert slot.is_fresh is False
@@ -106,11 +105,11 @@ class TestSessionSlot:
     def test_preemptive_refresh_threshold(self):
         # Session with remaining_ms just above preemptive threshold
         session = FreebuffSession(
-            instance_id="x", model="z-ai/glm-5.1",
+            instance_id="x", model="z-ai/glm-5.2",
             remaining_ms=PRE_EMPTIVE_REFRESH_MS + 100_000,
         )
         slot = SessionSlot(
-            account_index=0, model="z-ai/glm-5.1", session=session,
+            account_index=0, model="z-ai/glm-5.2", session=session,
             created_at=_time.time(), last_used_at=_time.time(),
         )
         assert slot.needs_preemptive_refresh is False

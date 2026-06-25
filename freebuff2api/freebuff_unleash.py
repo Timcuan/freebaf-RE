@@ -39,7 +39,7 @@ Usage:
     from freebuff2api.freebuff_unleash import UnleashPool
     pool = UnleashPool(settings, account_pool)
     await pool.start()  # start background warmup
-    lease = await pool.acquire("z-ai/glm-5.1")  # cached or fresh
+    lease = await pool.acquire("z-ai/glm-5.2")  # cached or fresh
 """
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ DEPLOYMENT_END_PT = 17
 
 # All Freebuff models for multi-model warmup
 ALL_FREEBUFF_MODELS = (
-    "z-ai/glm-5.1",      # Smartest, deployment_hours
+    "z-ai/glm-5.2",      # Smartest, referral-gated weekly pool (bypassed via session persistence)
     "minimax/minimax-m2.7",  # Fastest, always available
     "moonshotai/kimi-k2.6",  # Available
     "deepseek/deepseek-v4-pro",  # Available
@@ -348,7 +348,7 @@ class UnleashPool:
         self,
         requested_model: str,
         fallback_chain: tuple[str, ...] = (
-            "z-ai/glm-5.1",
+            "z-ai/glm-5.2",
             "moonshotai/kimi-k2.6",
             "deepseek/deepseek-v4-pro",
             "minimax/minimax-m2.7",

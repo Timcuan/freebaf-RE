@@ -77,7 +77,7 @@ See `DEPLOY.md` for full instructions including egress proxy setup.
 curl http://localhost:8000/v1/chat/completions \
   -H "Authorization: Bearer $FREEBUFF_API_KEY" \
   -d '{
-    "model": "z-ai/glm-5.1",
+    "model": "z-ai/glm-5.2",
     "messages": [{"role": "user", "content": "Hello"}],
     "stream": false
   }'
@@ -90,7 +90,7 @@ Compatible with any OpenAI SDK client — set `base_url=http://localhost:8000/v1
 Run `curl http://localhost:8000/v1/models -H "Authorization: Bearer $KEY"` for the full list.
 
 Highlights:
-- `z-ai/glm-5.1`, `zai/glm-5.2` — Z.AI GLM (smartest, deployment-hours limited upstream; cached 24/7 via Unleash)
+- `z-ai/glm-5.2` — Z.AI GLM 5.2 (smartest, referral-gated weekly pool upstream; cached 24/7 via Unleash session persistence)
 - `minimax/minimax-m2.7` — MiniMax (fastest, always available)
 - `moonshotai/kimi-k2.6` — Kimi
 - `deepseek/deepseek-v4-pro`, `deepseek/deepseek-v4-flash` — DeepSeek

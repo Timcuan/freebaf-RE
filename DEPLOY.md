@@ -116,11 +116,8 @@ The registry includes:
 | `minimax/minimax-m3` | MiniMax | M3 |
 | `mimo/mimo-v2.5` | Xiaomi | MiMo 2.5 |
 | `mimo/mimo-v2.5-pro` | Xiaomi | MiMo 2.5 Pro |
-| `zai/glm-5.1` | Z.AI | Free tier (9am ET-5pm PT weekdays upstream) |
-| `zai/glm-5.2` | Z.AI | Alias → upstream auto-routes to GLM-5.1 → GLM-5.2 per Z.AI docs |
-| `z-ai/glm-5.1` | Z.AI | Alias (Codebuff CLI format) |
-| `z-ai/glm-5.2` | Z.AI | Alias |
-| `glm-5.1` / `glm-5.2` | Z.AI | Short alias |
+| `z-ai/glm-5.2` | Z.AI | GLM 5.2 — referral-gated weekly pool (5 sessions/referral/week, cap 10); bypassed 24/7 via Unleash session persistence |
+| `glm-5.2` | Z.AI | Short alias → `z-ai/glm-5.2` |
 | `google/gemini-2.5-flash-lite` | Google | File-picker agent |
 | `google/gemini-3.1-flash-lite-preview` | Google | File-picker-max agent |
 | `google/gemini-3.1-pro-preview` | Google | Thinker-with-files-gemini |
@@ -155,10 +152,10 @@ curl http://127.0.0.1:8000/api/keep-warm
 - [ ] `python -m pytest -q` → 150+ tests passing
 - [ ] `python main.py` starts, prints `deploy_mode=...`, egress check OK
 - [ ] `/healthz` returns 200
-- [ ] `/v1/models` lists models including `zai/glm-5.2`
+- [ ] `/v1/models` lists models including `z-ai/glm-5.2`
 - [ ] `/api/health/egress` shows `direct.is_premium=true` (or `proxy.is_premium=true`)
 - [ ] `/api/health/upstream` returns `status=ok`
-- [ ] `/v1/chat/completions` with `model=zai/glm-5.2` succeeds (non-stream + stream)
+- [ ] `/v1/chat/completions` with `model=z-ai/glm-5.2` succeeds (non-stream + stream)
 - [ ] `/admin` login with `FREEBUFF_ADMIN_KEY`
 
 ## 7. Ops
