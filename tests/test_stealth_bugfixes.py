@@ -471,5 +471,50 @@ class ProxyAwareTokenVerifyTests(unittest.TestCase):
         assert "stealth_transport" in source or "build_stealth_client" in source
 
 
+class StealthTransportLoopTests(unittest.TestCase):
+    """BUG #32: handle_async_request should use get_running_loop, not deprecated get_event_loop."""
+
+    def test_uses_get_running_loop(self) -> None:
+        import inspect
+
+        from freebuff2api.stealth_transport import CurlCffiTransport
+
+        source = inspect.getsource(CurlCffiTransport.handle_async_request)
+        assert "get_running_loop" in source
+
+
+class RateGovernorFallbackSignalTests(unittest.TestCase):
+    """BUG #35: pick_account should return -1 when no account eligible (signal caller to fall back)."""
+
+    def test_all_idle_returns_negative_one(self) -> None:
+        from freebuff2api.rate_governor import RateGovernor
+
+        gov = RateGovernor(account_count=2)
+        # Force idle window
+        with patch("freebuff2api.rate_governor.time.time", return_value=3 * 3600):
+            picked = asyncio.run(gov.pick_account())
+        assert picked == -1
+
+    def test_all_at_cap_returns_negative_one(self) -> None:
+        from freebuff2api.rate_governor import RateGovernor
+
+        gov = RateGovernor(account_count=2, daily_msg_cap=1)
+        now = time.time()
+        for i in range(2):
+            gov._accounts[i].daily_msg_count = 1
+            gov._accounts[i].daily_reset_at = now + 99999
+        picked = asyncio.run(gov.pick_account())
+        assert picked == -1
+
+    def test_app_py_handles_negative_one(self) -> None:
+        """app.py should convert -1 to None (use default round-robin)."""
+        import inspect
+
+        from freebuff2api.app import chat_completions
+
+        source = inspect.getsource(chat_completions)
+        assert "preferred_index < 0" in source
+
+
 if __name__ == "__main__":
     unittest.main()

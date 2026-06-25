@@ -175,11 +175,10 @@ class RateGovernor:
             ]
             if not eligible:
                 logger.warning(
-                    "rate_governor: all %s accounts exhausted/idle — falling back to round-robin",
+                    "rate_governor: all %s accounts exhausted/idle — caller should fall back",
                     len(self._accounts),
                 )
-                # Fallback: least-recently-used, ignore caps
-                return min(range(len(self._accounts)), key=lambda i: self._accounts[i].last_used_at)
+                return -1  # signal caller to use default round-robin
 
             # Prefer accounts NOT approaching the soft cap (distribute load)
             healthy = [(i, acc) for i, acc in eligible if not self._approaching_soft_cap(acc, now)]

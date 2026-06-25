@@ -105,8 +105,8 @@ def test_rate_governor_skips_idle_accounts():
     t = 3 * 3600
     with patch("freebuff2api.rate_governor.time.time", return_value=t):
         picked = asyncio.run(gov.pick_account())
-    # All idle → fallback to least-recently-used (which is index 0 by default)
-    assert picked == 0
+    # All idle → return -1 (signal caller to fall back to default round-robin)
+    assert picked == -1
 
 
 def test_rate_governor_skips_daily_cap():
@@ -171,8 +171,8 @@ def test_rate_governor_all_exhausted_falls_back_to_lru():
     gov._accounts[0].last_used_at = now - 100
     gov._accounts[1].last_used_at = now - 200
     picked = asyncio.run(gov.pick_account())
-    # Account 1 is least recently used
-    assert picked == 1
+    # All exhausted → return -1 (signal caller to fall back to default round-robin)
+    assert picked == -1
 
 
 def test_rate_governor_prefer_healthy_over_soft_cap_approaching():
