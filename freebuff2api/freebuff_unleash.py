@@ -296,10 +296,9 @@ class UnleashPool:
                 )
                 continue
             except CodebuffError as e:
-                msg = str(e)
-                if "banned" in msg.lower():
+                if e.status_code == 403:
                     self.health[i].mark_banned()
-                elif "country_blocked" in msg.lower() or "geo" in msg.lower():
+                elif e.status_code == 451:
                     self.health[i].mark_geo_blocked()
                 logger.warning(
                     "unleash create failed account=%s model=%s: %s", i, model, e,
@@ -437,10 +436,24 @@ class UnleashPool:
         except RateLimitedError as e:
             self.health.mark_exhausted(e.pool or pool, reset_at=e.reset_at)
         except CodebuffError as e:
-            logger.debug(
-                "unleash warmup create failed account=%s model=%s: %s",
-                account_index, model, e,
-            )
+            # Mark account banned/geo-blocked so warmup stops retrying it.
+            if e.status_code == 403:
+                self.health[account_index].mark_banned()
+                logger.warning(
+                    "unleash account=%s banned — marked, will skip on future warmup",
+                    account_index,
+                )
+            elif e.status_code == 451:
+                self.health[account_index].mark_geo_blocked()
+                logger.warning(
+                    "unleash account=%s geo-blocked — marked, will skip on future warmup",
+                    account_index,
+                )
+            else:
+                logger.debug(
+                    "unleash warmup create failed account=%s model=%s: %s",
+                    account_index, model, e,
+                )
 
     def start(self) -> None:
         if self._warmup_task is None or self._warmup_task.done():
@@ -454,6 +467,15 @@ class UnleashPool:
             except asyncio.CancelledError:
                 pass
             self._warmup_task = None
+        # Cancel any in-flight warmup/refresh tasks to avoid leaks on shutdown.
+        for key, task in list(self._inflight.items()):
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        self._inflight.clear()
 
     def status(self) -> dict[str, Any]:
         return {

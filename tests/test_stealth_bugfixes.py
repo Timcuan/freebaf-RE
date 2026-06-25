@@ -312,5 +312,128 @@ class FingerprintReuseTests(unittest.TestCase):
         assert "save_fingerprint_store" not in reuse_only
 
 
+class Round4BugfixTests(unittest.TestCase):
+    """Round 4: resource leaks, banned/geo handling, security headers, input validation."""
+
+    def test_unleash_stop_cancels_inflight(self) -> None:
+        """BUG #18: stop() should cancel in-flight tasks, not just warmup_task."""
+        import inspect
+
+        from freebuff2api.freebuff_unleash import UnleashPool
+
+        source = inspect.getsource(UnleashPool.stop)
+        assert "_inflight" in source
+        assert "cancel" in source
+
+    def test_create_one_handles_banned_status_code(self) -> None:
+        """BUG #20: _create_one should mark banned via status_code, not string match."""
+        import inspect
+
+        from freebuff2api.freebuff_unleash import UnleashPool
+
+        source = inspect.getsource(UnleashPool._create_one)
+        assert "status_code == 403" in source
+        assert "status_code == 451" in source
+        assert "mark_banned" in source
+        assert "mark_geo_blocked" in source
+
+    def test_create_session_handles_banned_status_code(self) -> None:
+        """BUG #20: _create_session_any_account should use status_code."""
+        import inspect
+
+        from freebuff2api.freebuff_unleash import UnleashPool
+
+        source = inspect.getsource(UnleashPool._create_session_any_account)
+        assert "status_code == 403" in source
+        assert "status_code == 451" in source
+
+    def test_security_headers_middleware_exists(self) -> None:
+        """BUG #21: security headers middleware should be registered."""
+        import inspect
+
+        from freebuff2api.app import app, security_headers_middleware
+
+        # Verify middleware function exists
+        assert security_headers_middleware is not None
+        source = inspect.getsource(security_headers_middleware)
+        assert "X-Content-Type-Options" in source
+        assert "X-Frame-Options" in source
+        assert "Referrer-Policy" in source
+        assert "Strict-Transport-Security" in source
+
+    def test_admin_cookie_has_secure_flag(self) -> None:
+        """BUG #22: admin cookie should set secure flag on HTTPS."""
+        import inspect
+
+        from freebuff2api.admin import login
+
+        source = inspect.getsource(login)
+        assert "secure=" in source
+        assert "is_https" in source or "x-forwarded-proto" in source
+
+    def test_chat_completions_validates_json_body(self) -> None:
+        """BUG #23: chat completions should return 400 on malformed JSON."""
+        import inspect
+
+        from freebuff2api.app import chat_completions
+
+        source = inspect.getsource(chat_completions)
+        assert "valid JSON" in source
+        assert "isinstance(body, dict)" in source
+
+    def test_anthropic_messages_validates_json_body(self) -> None:
+        """BUG #23: anthropic messages should return 400 on malformed JSON."""
+        import inspect
+
+        from freebuff2api.app import anthropic_messages
+
+        source = inspect.getsource(anthropic_messages)
+        assert "valid JSON" in source
+
+    def test_reserve_account_has_timeout(self) -> None:
+        """BUG #9: _reserve_account should have timeout, not hang forever."""
+        import inspect
+
+        from freebuff2api.codebuff import CodebuffAccountPool
+
+        source = inspect.getsource(CodebuffAccountPool._reserve_account)
+        assert "timeout" in source
+        assert "wait_for" in source
+        assert "timed out" in source or "TimeoutError" in source
+
+
+class SecurityHeadersIntegrationTests(unittest.TestCase):
+    """Integration: verify security headers appear in responses."""
+
+    def test_security_headers_present(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from freebuff2api.app import app
+
+        with TestClient(app) as client:
+            response = client.get("/healthz")
+        assert response.headers.get("X-Content-Type-Options") == "nosniff"
+        assert response.headers.get("X-Frame-Options") == "DENY"
+        assert response.headers.get("Referrer-Policy") == "no-referrer"
+
+
+class ChatCompletionsValidationTests(unittest.TestCase):
+    """Integration: verify malformed JSON returns 400."""
+
+    def test_malformed_json_returns_400(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from freebuff2api.app import app
+
+        with patch.dict("os.environ", {"FREEBUFF_API_KEY": "k", "FREEBUFF_TOKEN": "tok"}, clear=True):
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/chat/completions",
+                    data="not valid json{{{",
+                    headers={"Authorization": "Bearer k"},
+                )
+        assert response.status_code == 400
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -137,6 +137,24 @@ app = FastAPI(title="freebuff2api", version="0.1.0", lifespan=lifespan)
 app.include_router(admin_router)
 
 
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Add security headers to all responses.
+
+    - X-Content-Type-Options: nosniff — prevent MIME sniffing
+    - X-Frame-Options: DENY — prevent admin panel clickjacking
+    - Referrer-Policy: no-referrer — don't leak URLs to upstream
+    - HSTS — only on HTTPS (avoid breaking HTTP local dev)
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
 def _settings(request: Request) -> Settings:
     return request.app.state.settings
 
@@ -372,7 +390,12 @@ async def get_model(request: Request, model_id: str) -> dict[str, Any]:
 async def chat_completions(request: Request) -> Any:
     api_key = _check_local_auth(request, require_configured=True)
     _check_freebuff_token(request)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="request body must be valid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be a JSON object")
     settings = _settings(request)
     try:
         model_config = resolve_model(body.get("model"))
@@ -764,7 +787,24 @@ async def _finalize_run_with_client(
 async def anthropic_messages(request: Request) -> Any:
     api_key = _check_anthropic_auth(request, require_configured=True)
     _check_freebuff_token(request)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            status_code=400,
+            content=anthropic_error_payload(
+                "request body must be valid JSON",
+                error_type="invalid_request_error",
+            ),
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=400,
+            content=anthropic_error_payload(
+                "request body must be a JSON object",
+                error_type="invalid_request_error",
+            ),
+        )
     settings = _settings(request)
 
     # Validate required fields — return Anthropic-compatible errors.

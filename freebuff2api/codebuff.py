@@ -922,8 +922,14 @@ class CodebuffAccountPool:
             self._accounts[account_index].busy = False
             self._condition.notify(1)
 
-    async def _reserve_account(self, *, preferred_index: int | None = None) -> int:
+    async def _reserve_account(
+        self,
+        *,
+        preferred_index: int | None = None,
+        timeout: float = 30.0,
+    ) -> int:
         async with self._condition:
+            deadline = time.time() + timeout
             while True:
                 # If a preferred index is provided and that account is free, use it.
                 if preferred_index is not None:
@@ -937,7 +943,23 @@ class CodebuffAccountPool:
                     self._accounts[account_index].busy = True
                     self._next_index = (account_index + 1) % len(self._accounts)
                     return account_index
-                await self._condition.wait()
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise CodebuffError(
+                        f"all {len(self._accounts)} accounts busy — "
+                        f"request timed out after {timeout}s. "
+                        "Increase FREEBUFF_TOKEN pool or reduce concurrency.",
+                        503,
+                    )
+                try:
+                    await asyncio.wait_for(self._condition.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    raise CodebuffError(
+                        f"all {len(self._accounts)} accounts busy — "
+                        f"request timed out after {timeout}s. "
+                        "Increase FREEBUFF_TOKEN pool or reduce concurrency.",
+                        503,
+                    )
 
     def _next_available_index(self) -> int | None:
         account_count = len(self._accounts)

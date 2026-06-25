@@ -184,12 +184,16 @@ async def login(request: Request) -> JSONResponse:
     if not hmac.compare_digest(key, expected):
         raise HTTPException(status_code=401, detail="Invalid admin key")
     response = JSONResponse(_api_ok(_config_payload(_settings(request))))
+    # Set secure flag only when request is over HTTPS (or behind a reverse proxy
+    # that terminates TLS). Local dev over HTTP keeps the cookie working.
+    is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
     response.set_cookie(
         COOKIE_NAME,
         _cookie_value(_admin_secret(_settings(request)) or expected),
         max_age=COOKIE_MAX_AGE,
         httponly=True,
         samesite="lax",
+        secure=is_https,
     )
     return response
 
