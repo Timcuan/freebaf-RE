@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from .codebuff import CodebuffAccountPool, CodebuffClient, CodebuffError
 from .config import DEFAULT_ADMIN_KEY, Settings, project_env_path, write_env_values
 from .logging_config import get_buffered_logs
-from .login_flow import poll_login, start_login, verify_token_sync
+from .login_flow import poll_login, start_login, verify_token as verify_token_async, verify_token_sync
 from .models import DEFAULT_MODEL, models_response
 from .usage import ApiKeyRecord
 from .usage_store import ApiKeyStore, RequestStore
@@ -55,6 +55,17 @@ def _check_admin_auth(request: Request) -> None:
     if _is_admin_authenticated(request):
         return
     raise HTTPException(status_code=401, detail="Admin login required")
+
+
+async def _parse_json_body(request: Request) -> dict[str, Any]:
+    """Parse JSON body with validation. Returns 400 on malformed JSON / non-object."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="request body must be valid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be a JSON object")
+    return body
 
 
 def _is_admin_authenticated(request: Request) -> bool:
@@ -176,7 +187,7 @@ async def admin_page() -> HTMLResponse:
 
 @router.post("/admin/api/login")
 async def login(request: Request) -> JSONResponse:
-    body = await request.json()
+    body = await _parse_json_body(request)
     key = str(body.get("key") or "")
     expected = _expected_login_key(_settings(request))
     if not expected:
@@ -394,7 +405,7 @@ async def network(request: Request) -> dict[str, Any]:
 @router.put("/admin/api/freebuff-tokens")
 async def save_tokens(request: Request) -> dict[str, Any]:
     _check_admin_auth(request)
-    body = await request.json()
+    body = await _parse_json_body(request)
     tokens = [str(item).strip() for item in body.get("tokens") or []]
     return _api_ok(await _save_token_list(request, tokens), "tokens saved")
 
@@ -402,7 +413,7 @@ async def save_tokens(request: Request) -> dict[str, Any]:
 @router.post("/admin/api/freebuff-tokens/verify")
 async def verify_token(request: Request) -> dict[str, Any]:
     _check_admin_auth(request)
-    body = await request.json()
+    body = await _parse_json_body(request)
     token = str(body.get("token") or "").strip()
     if not token:
         raise HTTPException(status_code=400, detail="Token is required")
@@ -430,7 +441,7 @@ async def get_token(request: Request, index: int) -> dict[str, Any]:
 @router.post("/admin/api/freebuff-tokens")
 async def add_token(request: Request) -> dict[str, Any]:
     _check_admin_auth(request)
-    body = await request.json()
+    body = await _parse_json_body(request)
     token = str(body.get("token") or "").strip()
     if not token:
         raise HTTPException(status_code=400, detail="Token is required")
@@ -442,7 +453,7 @@ async def add_token(request: Request) -> dict[str, Any]:
 @router.put("/admin/api/freebuff-tokens/{index}")
 async def update_token(request: Request, index: int) -> dict[str, Any]:
     _check_admin_auth(request)
-    body = await request.json()
+    body = await _parse_json_body(request)
     token = str(body.get("token") or "").strip()
     if not token:
         raise HTTPException(status_code=400, detail="Token is required")
@@ -598,8 +609,8 @@ async def login_flow_commit(request: Request, session_id: str) -> dict[str, Any]
         if s["status"] != "success" or not s["user"]:
             raise HTTPException(status_code=400, detail=f"login session status is '{s['status']}', cannot commit")
         token = s["user"]["auth_token"]
-    # Auto-verify before adding
-    ok, info = verify_token_sync(token)
+    # Auto-verify before adding (proxy-aware)
+    ok, info = await verify_token_async(token)
     if not ok:
         raise HTTPException(status_code=402, detail=f"token rejected by upstream: {info}")
     tokens = _tokens(_settings(request))
@@ -631,7 +642,7 @@ async def login_flow_cancel(request: Request, session_id: str) -> dict[str, Any]
 @router.put("/admin/api/api-key")
 async def save_api_key(request: Request) -> dict[str, Any]:
     _check_admin_auth(request)
-    body = await request.json()
+    body = await _parse_json_body(request)
     api_key = str(body.get("api_key") or "").strip()
     if len(api_key) < 8:
         raise HTTPException(status_code=400, detail="API key must be at least 8 characters")
@@ -649,7 +660,7 @@ async def save_api_key(request: Request) -> dict[str, Any]:
 @router.put("/admin/api/security")
 async def save_security(request: Request) -> JSONResponse:
     _check_admin_auth(request)
-    body = await request.json()
+    body = await _parse_json_body(request)
     admin_key = str(body.get("admin_key") or "").strip()
     if len(admin_key) < 8:
         raise HTTPException(status_code=400, detail="Admin key must be at least 8 characters")
@@ -679,7 +690,7 @@ async def save_security(request: Request) -> JSONResponse:
 @router.post("/admin/api/chat-test")
 async def chat_test(request: Request) -> dict[str, Any]:
     _check_admin_auth(request)
-    body = await request.json()
+    body = await _parse_json_body(request)
     model = str(body.get("model") or DEFAULT_MODEL.id).strip() or DEFAULT_MODEL.id
     prompt = str(body.get("prompt") or "ping").strip() or "ping"
     from .app import _collect_completion, _start_freebuff_run_chain
@@ -775,7 +786,7 @@ async def list_api_keys(request: Request) -> dict[str, Any]:
 @router.post("/admin/api/api-keys")
 async def create_api_key(request: Request) -> dict[str, Any]:
     _check_admin_auth(request)
-    body = await request.json()
+    body = await _parse_json_body(request)
     name = str(body.get("name") or "").strip()
     key = str(body.get("key") or "").strip()
     if not name:
@@ -800,7 +811,7 @@ async def create_api_key(request: Request) -> dict[str, Any]:
 @router.put("/admin/api/api-keys/{name}")
 async def update_api_key(request: Request, name: str) -> dict[str, Any]:
     _check_admin_auth(request)
-    body = await request.json()
+    body = await _parse_json_body(request)
     store = _api_key_store(request)
     fields: dict[str, Any] = {}
     if "key" in body:

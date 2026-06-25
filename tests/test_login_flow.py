@@ -238,11 +238,25 @@ def test_verify_token_sync_ok_on_200():
         assert "200" in info
 
 
-def test_verify_token_async_wraps_sync():
+def test_verify_token_async_uses_httpx():
+    """verify_token should use httpx (proxy-aware), not wrap sync."""
     async def run():
         return await login_flow.verify_token("tok")
 
-    with patch("freebuff2api.login_flow.verify_token_sync", return_value=(True, "ok")):
-        ok, info = asyncio.run(run())
-        assert ok is True
-        assert info == "ok"
+    # Mock httpx.AsyncClient.get to return a 200 response
+    class FakeResp:
+        status_code = 200
+        text = "ok"
+
+    class FakeClient:
+        async def get(self, url, headers=None):
+            return FakeResp()
+
+        async def aclose(self):
+            pass
+
+    with patch("httpx.AsyncClient", return_value=FakeClient()):
+        with patch.dict("os.environ", {"FREEBUFF_STEALTH_TLS": "false", "FREEBUFF_EGRESS_PROXY_URL": "", "FREEBUFF_PROXY_URL": ""}):
+            ok, info = asyncio.run(run())
+            assert ok is True
+            assert "HTTP 200" in info
