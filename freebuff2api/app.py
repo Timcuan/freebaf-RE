@@ -67,6 +67,52 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.api_key_store = api_key_store
     logger.info("configured freebuff accounts count=%s api_keys=%s", accounts.account_count, api_key_store.total_count)
 
+    # Stealth pre-flight: verify egress lands in a premium region AND is not
+    # hard-blocked by upstream's VPN/proxy detection (commit #709).
+    # If non-premium OR privacy-hard-blocked, every session attempt will fail
+    # — log loud so the operator fixes the proxy before burning tokens.
+    if settings.egress_auto and accounts.account_count > 0:
+        try:
+            from .proxy_validation import validate_egress_for_upstream
+            egress = await validate_egress_for_upstream(settings.upstream_proxy_url)
+            app.state.egress_info = egress
+            if egress.get("ok"):
+                proxy_info = egress.get("proxy") or {}
+                via = "proxy" if proxy_info.get("ok") else "direct"
+                info = proxy_info if via == "proxy" else egress["direct"]
+                logger.info(
+                    "stealth egress OK via %s country=%s privacy=%s",
+                    via, info.get("country"), info.get("privacy_signals") or [],
+                )
+            else:
+                logger.warning(
+                    "stealth egress FAIL: %s — sessions will be rejected. %s",
+                    egress.get("recommendation"),
+                    "Set FREEBUFF_EGRESS_PROXY_URL to a residential US/CA proxy "
+                    "(commercial VPN/SOCKS5 are flagged as vpn/proxy/tor).",
+                )
+        except Exception as e:
+            logger.debug("stealth egress pre-flight skipped: %s", e)
+
+    # Rate governor — anti 24/7 pattern evasion (commit #527 bot-sweep).
+    # Distributes requests across accounts + idle windows so per-account
+    # usage stays below the 50 msgs / 20 hours HIGH-tier threshold.
+    rate_governor = None
+    if accounts.account_count > 0:
+        try:
+            from .rate_governor import RateGovernor
+
+            rate_governor = RateGovernor(account_count=accounts.account_count)
+            app.state.rate_governor = rate_governor
+            logger.info(
+                "rate governor active: accounts=%s daily_cap=%s soft_msg_cap=%s",
+                accounts.account_count,
+                rate_governor.daily_msg_cap,
+                rate_governor.soft_msg_cap,
+            )
+        except Exception as e:
+            logger.warning("rate governor init failed: %s", e)
+
     # Freebuff Unleash — multi-account × multi-model session pool for unlimited access
     unleash_pool = None
     if settings.codebuff_tokens:
@@ -217,6 +263,51 @@ async def health_egress(request: Request) -> dict[str, Any]:
     from .egress_region import verify_premium_egress
     settings = _settings(request)
     return await verify_premium_egress(settings)
+
+
+@app.get("/api/health/stealth")
+async def health_stealth(request: Request) -> dict[str, Any]:
+    """Full stealth diagnostic: egress + privacy signals + rate governor.
+
+    Auth: requires admin key.
+    """
+    _check_local_auth(request)
+    settings = _settings(request)
+    from .proxy_validation import validate_egress_for_upstream
+    from .stealth_transport import is_stealth_transport_available, SUPPORTED_PROFILES, DEFAULT_PROFILE
+
+    egress = await validate_egress_for_upstream(settings.upstream_proxy_url)
+    governor_status = None
+    governor = getattr(request.app.state, "rate_governor", None)
+    if governor:
+        governor_status = governor.status()
+
+    return {
+        "egress": egress,
+        "stealth_tls": {
+            "available": is_stealth_transport_available(),
+            "profile": DEFAULT_PROFILE,
+            "supported_profiles": list(SUPPORTED_PROFILES),
+            "enabled": _env_bool("FREEBUFF_STEALTH_TLS", default=True),
+        },
+        "rate_governor": governor_status,
+        "fingerprint_store": str(_fingerprint_store_path()),
+    }
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    import os
+
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _fingerprint_store_path() -> str:
+    from .stealth import fingerprint_store_path
+
+    return fingerprint_store_path()
 
 
 @app.get("/api/health/upstream")

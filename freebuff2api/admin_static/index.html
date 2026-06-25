@@ -222,7 +222,12 @@
             <n-card title="Freebuff tokens" :bordered="true" style="grid-column: 1 / -1;">
               <n-space style="margin-bottom: 12px;" justify="space-between">
                 <h3 style="margin:0;">Token list</h3>
-                <n-button type="primary" @click="openTokenModal('add')">Add token</n-button>
+                <n-space>
+                  <n-button type="primary" @click="startLoginFlow('freebuff')" :loading="loading.loginFlow">
+                    Login new account
+                  </n-button>
+                  <n-button secondary @click="openTokenModal('add')">Add token manually</n-button>
+                </n-space>
               </n-space>
               <n-list v-if="config.tokens && config.tokens.length" hoverable>
                 <n-list-item v-for="token in config.tokens" :key="token.index">
@@ -412,6 +417,52 @@
             </n-form>
           </n-modal>
 
+          <!-- Login Flow Modal -->
+          <n-modal v-model:show="loginFlowModal.show" preset="card" title="Login new Freebuff account" style="width: min(640px, 92vw)">
+            <n-alert type="info" style="margin-bottom: 16px;">
+              Sign in with a Freebuff/Codebuff account in the popup. The token is harvested automatically and added to the pool — no copy/paste needed, and the CLI's single-profile credential file is never touched.
+            </n-alert>
+            <n-space vertical>
+              <div v-if="loginFlowModal.status === 'idle'">
+                <n-space>
+                  <n-button type="primary" @click="startLoginFlow('freebuff')">Login via freebuff.com</n-button>
+                  <n-button secondary @click="startLoginFlow('codebuff')">Login via codebuff.com</n-button>
+                </n-space>
+              </div>
+              <div v-else-if="loginFlowModal.status === 'pending'">
+                <p>Waiting for browser sign-in. Open this URL if the popup did not appear:</p>
+                <n-input :value="loginFlowModal.loginUrl" readonly type="textarea" :autosize="{ minRows: 2, maxRows: 4 }" />
+                <n-space style="margin-top: 12px;">
+                  <n-button tag="a" :href="loginFlowModal.loginUrl" target="_blank" type="info">Open URL</n-button>
+                  <n-button tertiary type="error" @click="cancelLoginFlow">Cancel</n-button>
+                </n-space>
+                <n-progress status="info" :show-indicator="false" style="margin-top: 12px;" :percentage="100" processing />
+              </div>
+              <div v-else-if="loginFlowModal.status === 'success'">
+                <n-alert type="success" title="Authenticated">
+                  Signed in as <strong>{{ loginFlowModal.user && loginFlowModal.user.email }}</strong>
+                  <div class="muted" style="margin-top:4px;">user id: {{ loginFlowModal.user && loginFlowModal.user.user_id }}</div>
+                </n-alert>
+                <n-space style="margin-top: 12px;">
+                  <n-button type="primary" :loading="loading.loginCommit" @click="commitLoginFlow">Add to pool &amp; save</n-button>
+                  <n-button tertiary type="error" @click="cancelLoginFlow">Discard</n-button>
+                </n-space>
+              </div>
+              <div v-else-if="loginFlowModal.status === 'timeout'">
+                <n-alert type="warning" title="Timed out">Login was not completed within 5 minutes.</n-alert>
+                <n-button style="margin-top:12px;" @click="resetLoginFlow">Try again</n-button>
+              </div>
+              <div v-else-if="loginFlowModal.status === 'error'">
+                <n-alert type="error" title="Error">{{ loginFlowModal.error || 'Unknown error' }}</n-alert>
+                <n-button style="margin-top:12px;" @click="resetLoginFlow">Try again</n-button>
+              </div>
+              <div v-else-if="loginFlowModal.status === 'cancelled'">
+                <n-alert type="info" title="Cancelled">Login flow cancelled.</n-alert>
+                <n-button style="margin-top:12px;" @click="resetLoginFlow">Start over</n-button>
+              </div>
+            </n-space>
+          </n-modal>
+
           <!-- API Key Modal -->
           <n-modal v-model:show="apiKeyModal.show" preset="card" :title="apiKeyModal.mode === 'add' ? 'Add API key' : 'Edit API key'" style="width: min(640px, 92vw)">
             <n-form>
@@ -480,6 +531,15 @@
         const testForm = reactive({ model: '', prompt: 'Reply with a one-line status of the current service.' });
         const tokenHelpUrl = 'https://freebuff.071129.xyz/';
         const tokenModal = reactive({ show: false, mode: 'add', index: null, token: '' });
+        const loginFlowModal = reactive({
+          show: false,
+          status: 'idle',
+          sessionId: null,
+          loginUrl: '',
+          user: null,
+          error: null,
+          pollTimer: null
+        });
         const security = reactive({ admin_key: '' });
 
         const reqRecords = ref([]);
@@ -500,7 +560,8 @@
         const loading = reactive({
           login: false, page: false, tokens: false, tokenRead: null, tokenDelete: null,
           verify: null, logs: false, models: false, test: false,
-          env: false, network: false, security: false, requests: false, apiKeys: false
+          env: false, network: false, security: false, requests: false, apiKeys: false,
+          loginFlow: false, loginCommit: false
         });
 
         const nav = [
@@ -720,6 +781,90 @@
           if (mode === 'edit' && index !== null) loadTokenForEdit(index);
         }
 
+        function stopLoginFlowPoll() {
+          if (loginFlowModal.pollTimer) {
+            clearInterval(loginFlowModal.pollTimer);
+            loginFlowModal.pollTimer = null;
+          }
+        }
+
+        function resetLoginFlow() {
+          stopLoginFlowPoll();
+          loginFlowModal.status = 'idle';
+          loginFlowModal.sessionId = null;
+          loginFlowModal.loginUrl = '';
+          loginFlowModal.user = null;
+          loginFlowModal.error = null;
+        }
+
+        async function startLoginFlow(mode) {
+          loading.loginFlow = true;
+          loginFlowModal.show = true;
+          loginFlowModal.status = 'pending';
+          loginFlowModal.user = null;
+          loginFlowModal.error = null;
+          try {
+            const res = await api(`/admin/api/login-flow/start?mode=${encodeURIComponent(mode)}`, { method: 'POST' });
+            const data = res.data || {};
+            loginFlowModal.sessionId = data.session_id;
+            loginFlowModal.loginUrl = data.login_url;
+            try { window.open(data.login_url, '_blank', 'noopener'); } catch (e) {}
+            stopLoginFlowPoll();
+            loginFlowModal.pollTimer = setInterval(pollLoginFlow, 2500);
+          } catch (error) {
+            loginFlowModal.status = 'error';
+            loginFlowModal.error = normalizeError(error);
+            message.error(normalizeError(error));
+          } finally { loading.loginFlow = false; }
+        }
+
+        async function pollLoginFlow() {
+          if (!loginFlowModal.sessionId) return;
+          try {
+            const res = await api(`/admin/api/login-flow/poll/${encodeURIComponent(loginFlowModal.sessionId)}`);
+            const data = res.data || {};
+            if (data.status === 'success') {
+              stopLoginFlowPoll();
+              loginFlowModal.status = 'success';
+              loginFlowModal.user = data.user;
+            } else if (data.status === 'timeout') {
+              stopLoginFlowPoll();
+              loginFlowModal.status = 'timeout';
+            } else if (data.status === 'error') {
+              stopLoginFlowPoll();
+              loginFlowModal.status = 'error';
+              loginFlowModal.error = data.error;
+            }
+          } catch (error) {
+            // network blip — keep polling
+          }
+        }
+
+        async function commitLoginFlow() {
+          if (!loginFlowModal.sessionId) return;
+          loading.loginCommit = true;
+          try {
+            const res = await api(`/admin/api/login-flow/commit/${encodeURIComponent(loginFlowModal.sessionId)}`, { method: 'POST' });
+            message.success(res.msg || 'Token added to pool');
+            stopLoginFlowPoll();
+            loginFlowModal.show = false;
+            resetLoginFlow();
+            await loadOverview();
+          } catch (error) {
+            message.error(normalizeError(error));
+          } finally { loading.loginCommit = false; }
+        }
+
+        async function cancelLoginFlow() {
+          if (!loginFlowModal.sessionId) { resetLoginFlow(); return; }
+          try {
+            await api(`/admin/api/login-flow/cancel/${encodeURIComponent(loginFlowModal.sessionId)}`, { method: 'POST' }).catch(() => null);
+          } finally {
+            stopLoginFlowPoll();
+            loginFlowModal.status = 'cancelled';
+          }
+        }
+
         async function loadTokenForEdit(index) {
           loading.tokenRead = index;
           try {
@@ -846,12 +991,13 @@
 
         return {
           checkingSession, authed, loginKey, tab, nav, overview, config, logs, logLevel, logLimit,
-          logLevels, logAutoRefresh, logRefreshSeconds, lastEnv, envInfo, networkInfo, modelOptions, testForm, testResult, tokenHelpUrl, tokenModal,
+          logLevels, logAutoRefresh, logRefreshSeconds, lastEnv, envInfo, networkInfo, modelOptions, testForm, testResult, tokenHelpUrl, tokenModal, loginFlowModal,
           security, loading, activeTitle, activeSubtitle,
           reqRecords, reqStats, reqLimit, reqFilter, reqStatusOptions, reqModelOptions,
           apiKeys, apiKeyModal, apiKeyModelOptions,
           login, logout, refreshAll, loadLogs, loadModels, loadEnv, loadNetwork, syncLogAutoRefresh, openTokenModal,
           saveTokenModal, deleteToken, verifyTokenValue, verifySavedToken,
+          startLoginFlow, pollLoginFlow, commitLoginFlow, cancelLoginFlow, resetLoginFlow,
           loadRequests, clearRequests,
           loadApiKeys, openApiKeyModal, saveApiKeyModal, toggleApiKey, deleteApiKey,
           runChatTest, saveSecurity, copyLogs, copyEnvContent, copyApiKey

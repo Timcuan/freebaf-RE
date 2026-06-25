@@ -18,9 +18,12 @@ from .models import agent_validation_payload
 logger = logging.getLogger("freebuff2api.codebuff")
 
 CODEBUFF_ACCEPT_ENCODING = "gzip, deflate"
-# Defaults retained for backward compat; actual values now come from Settings
-# (env-overridable: FREEBUFF_CLI_USER_AGENT, FREEBUFF_FREEBUFF_CLI_USER_AGENT).
-CODEBUFF_JSON_USER_AGENT = "Bun/1.3.11"
+# Upstream User-Agents (verified against CodebuffAI/codebuff, June 2026):
+#   - CLI HTTP requests: codebuff/<version>
+#   - Freebuff CLI variant: Freebuff-CLI/<version>
+#   - JSON API requests: codebuff/<version> (was Bun/1.3.11 in old releases)
+# Override via env (FREEBUFF_CLI_USER_AGENT, FREEBUFF_FREEBUFF_CLI_USER_AGENT).
+CODEBUFF_JSON_USER_AGENT = "codebuff/1.0.682"
 FREEBUFF_CLI_USER_AGENT = "Freebuff-CLI/0.0.105"
 CHAT_COMPLETIONS_USER_AGENT = (
     "ai-sdk/openai-compatible/0.0.0-test/codebuff "
@@ -101,12 +104,34 @@ class FreebuffSessionLease:
 class CodebuffClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(settings.request_timeout, read=None),
-            follow_redirects=True,
-            proxy=settings.upstream_proxy_url,
-            trust_env=False,
-        )
+        # Stealth TLS transport: when FREEBUFF_STEALTH_TLS=true and curl_cffi
+        # is installed, route upstream through a Chrome-impersonating transport
+        # so the JA3/JA4 fingerprint matches a real browser instead of Python.
+        stealth_tls = _env_bool("FREEBUFF_STEALTH_TLS", default=True)
+        if stealth_tls:
+            try:
+                from .stealth_transport import build_stealth_client
+
+                self._client = build_stealth_client(
+                    proxy=settings.upstream_proxy_url,
+                    timeout=settings.request_timeout,
+                    trust_env=False,
+                )
+            except Exception as e:
+                logger.warning("stealth TLS transport init failed, falling back to httpx: %s", e)
+                self._client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(settings.request_timeout, read=None),
+                    follow_redirects=True,
+                    proxy=settings.upstream_proxy_url,
+                    trust_env=False,
+                )
+        else:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(settings.request_timeout, read=None),
+                follow_redirects=True,
+                proxy=settings.upstream_proxy_url,
+                trust_env=False,
+            )
         self._agents_validated = False
         self._validate_lock = asyncio.Lock()
 
@@ -131,6 +156,7 @@ class CodebuffClient:
         headers = {
             "Accept": "*/*",
             "Accept-Encoding": CODEBUFF_ACCEPT_ENCODING,
+            "Accept-Language": self._accept_language(),
             "Connection": "keep-alive",
             "Host": _host_header(self.settings.codebuff_api_url),
             "User-Agent": user_agent,
@@ -142,6 +168,31 @@ class CodebuffClient:
         if extra:
             headers.update(extra)
         return headers
+
+    def _accept_language(self) -> str:
+        """Resolve Accept-Language header to match the configured locale fingerprint.
+
+        Upstream CLI sends Accept-Language consistent with the device locale.
+        Mismatch (e.g. zh-CN locale but en-US Accept-Language) is a cheap
+        fingerprinting signal. We map the configured locale to a realistic
+        Accept-Language value.
+        """
+        locale = (self.settings.locale or "en-US").lower()
+        # Map common CLI locales to browser-style Accept-Language values
+        mapping = {
+            "zh-cn": "zh-CN,zh;q=0.9,en;q=0.8",
+            "zh-tw": "zh-TW,zh;q=0.9,en;q=0.8",
+            "en-us": "en-US,en;q=0.9",
+            "en-gb": "en-GB,en;q=0.9",
+            "ja-jp": "ja-JP,ja;q=0.9,en;q=0.8",
+            "ko-kr": "ko-KR,ko;q=0.9,en;q=0.8",
+            "de-de": "de-DE,de;q=0.9,en;q=0.8",
+            "fr-fr": "fr-FR,fr;q=0.9,en;q=0.8",
+            "es-es": "es-ES,es;q=0.9,en;q=0.8",
+            "pt-br": "pt-BR,pt;q=0.9,en;q=0.8",
+            "ru-ru": "ru-RU,ru;q=0.9,en;q=0.8",
+        }
+        return mapping.get(locale, f"{locale},{locale.split('-')[0]};q=0.9,en;q=0.8")
 
     async def _json(
         self,
@@ -862,6 +913,15 @@ def utc_now_iso() -> str:
 def _host_header(url: str) -> str:
     parsed = urlparse(url)
     return parsed.netloc or "www.codebuff.com"
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    import os
+
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _queue_poll_delay(estimated_wait_ms: Any) -> float:

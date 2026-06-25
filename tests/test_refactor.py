@@ -153,7 +153,9 @@ class SettingsNewFieldsTests(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k != "FREEBUFF_CLI_USER_AGENT"}
         with patch.dict("os.environ", env, clear=True):
             s = load_settings()
-            self.assertEqual(s.cli_user_agent, "Bun/1.3.11")
+            # Must match a real upstream CLI version (codebuff/<version>), not Bun/<ver>
+            self.assertTrue(s.cli_user_agent.startswith("codebuff/"))
+            self.assertNotIn("Bun/", s.cli_user_agent)
 
     def test_egress_settings_loaded(self) -> None:
         with patch.dict("os.environ", {
