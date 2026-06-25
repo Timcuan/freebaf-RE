@@ -27,6 +27,126 @@ python main.py
 
 Open `http://localhost:8000/admin` and sign in with `sk-admin` (change it on the Settings tab).
 
+## Stealth
+
+The gateway mimics the official Codebuff CLI closely enough to avoid bot
+detection. Verified against `CodebuffAI/codebuff` source (June 2026),
+including the anti-abuse commits:
+- `#527` hourly bot-sweep (abuse-detection.ts)
+- `#558` harden country gating
+- `#628` opaque CLI auth tokens
+- `#709` block VPN/proxy/Tor traffic via IPinfo privacy signals
+
+| Signal | Upstream detection | freebaf-RE counter-measure |
+|---|---|---|
+| Fingerprint format | `codebuff-cli-<8 base64url>` (legacy) or `enhanced-<sha256>` | `stealth.py` generates valid `codebuff-cli-<8 base64url>` |
+| Fingerprint stability | cached per machine for process lifetime | persisted per-account to `~/.config/freebaf-re/fingerprints.json` (0600) |
+| Fingerprint sharing | bot-sweep flags fingerprints shared across users | unique fingerprint per account (sha256-derived key) |
+| sig_hash sharing | bot-sweep catches rotated fingerprints from same device | each account has its own fingerprint, claimed at OAuth — no sharing |
+| User-Agent | `codebuff/<version>` (latest: 1.0.682) | `codebuff/1.0.682` (env-overridable) |
+| Accept-Language | matches device locale | mapped from `FREEBUFF_LOCALE` (zh-CN → `zh-CN,zh;q=0.9,en;q=0.8`) |
+| Device fingerprint | `os`, `timezone`, `locale` in ad-request body | mirrored from settings (`windows`, `Asia/Shanghai`, `zh-CN`) |
+| Browser UA (ad providers) | current Chrome | `Chrome/137.0.0.0` |
+| TLS JA3/JA4 fingerprint | Cloudflare sees Python ssl stack vs real browser | `curl_cffi` impersonates Chrome124 TLS ClientHello (`FREEBUFF_STEALTH_TLS=true`) |
+| VPN/proxy/Tor egress | IPinfo privacy signals → hard-block 403 (commit #709) | `proxy_validation.py` pre-flight rejects flagged proxies before any token is spent |
+| Country block | non-US/CA → `session_model_mismatch` 409 | `FREEBUFF_EGRESS_PROXY_URL` routes through residential US/CA proxy |
+| 24/7 usage pattern | 50+ msgs in 20+ distinct hours → HIGH tier (score 100) | `rate_governor.py` distributes load + idle windows per account |
+| New-account burst | <1d old + 200 msgs → +40 score | governor daily cap 180 < 200 |
+| Heavy usage | 500 msgs/24h → +50 score | governor soft cap 40 msgs + 16 hours |
+| Plus-alias email | `user+abc123@` → +10 score | login flow uses real OAuth accounts (Google/GitHub), no aliases |
+| Email-digits / duck.com / handle-userN | +5/+10/+5 score | real OAuth accounts only |
+
+### Egress pre-flight
+
+On startup, if `FREEBUFF_EGRESS_AUTO=true` and at least one account is
+configured, the gateway runs `validate_egress_for_upstream()` which:
+
+1. Probes the direct egress IP through IPinfo (privacy signals)
+2. If `FREEBUFF_EGRESS_PROXY_URL` is set, probes the proxy egress too
+3. Classifies each as:
+   - **clean** — no privacy signals, premium region → safe
+   - **limited** — `hosting` signal only → DeepSeek Flash path only
+   - **hard-blocked** — `vpn`/`proxy`/`tor`/`res_proxy` → reject
+4. Logs OK/WARN before any token is spent on a doomed session
+
+**Critical:** commercial VPN/SOCKS5 services (NordVPN, ExpressVPN, Mullvad,
+etc.) are flagged as `vpn` by IPinfo and will get every account banned.
+Use a **residential proxy** service (Bright Data, Soax, Smartproxy) with
+US/CA exit IPs — those are not flagged.
+
+### Rate governor
+
+`rate_governor.py` tracks per-account 24h rolling usage and:
+
+1. Skips accounts in their idle window (default 00:00–07:00 local)
+2. Skips accounts at daily cap (default 180 < 200 burst flag)
+3. Prefers accounts NOT approaching soft cap (40 msgs / 16 hours)
+4. Picks the account with lowest `msgs_24h` to distribute load evenly
+5. Falls back to least-recently-used when all exhausted (degraded service
+   over total outage)
+6. Injects 50–350ms jitter before each request to break burst patterns
+
+Status visible at `/api/health/stealth` (admin auth).
+
+### Bot-sweep evasion
+
+Codebuff runs an hourly bot-sweep (commit #527) that emails james@codebuff.com
+with ranked suspects. The sweep does NOT auto-ban — it's a dry-run that
+feeds manual review. Our counter-measures ensure none of the trigger
+signals fire:
+
+- **No fingerprint sharing** — each account has a unique stable fingerprint
+- **No sig_hash sharing** — fingerprints are claimed per-user at OAuth
+- **No 24/7 pattern** — rate governor keeps usage below 50 msgs / 20 hours
+- **No new-account burst** — daily cap 180 < 200 threshold
+- **No plus-alias / duck.com / email-digits** — real OAuth accounts only
+
+Monitor your stealth posture:
+
+```bash
+curl http://localhost:8000/api/health/stealth -H "Authorization: Bearer $ADMIN_KEY"
+```
+
+The response includes egress validation, TLS stealth status, rate governor
+per-account usage, and the fingerprint store path.
+
+## Multi-account login
+
+The Codebuff CLI only stores one `default` profile in
+`~/.config/codebuff/credentials.json` — logging in a second account
+overwrites the first, forcing a logout/re-login every time you switch.
+`scripts/login.py` bypasses this so you can stack N accounts into a pool:
+
+```bash
+# login a new account (opens browser, polls for authToken)
+python scripts/login.py
+
+# append the new token to .env FREEBUFF_TOKEN (comma-joined with existing)
+python scripts/login.py --write-env
+
+# list stored tokens
+python scripts/login.py list
+
+# verify a token still works
+python scripts/login.py verify 0
+
+# remove a token by index
+python scripts/login.py remove 0
+
+# print FREEBUFF_TOKEN=tok1,tok2,... for paste into .env
+python scripts/login.py export
+
+# use codebuff.com instead of freebuff.com
+python scripts/login.py --codebuff
+```
+
+Tokens are stored at `~/.config/freebaf-re/tokens.json` (mode 0600) — the
+CLI's own `credentials.json` is never touched, so the official CLI keeps
+working with whatever account it already had. Each `python scripts/login.py`
+run produces a fresh fingerprint and stores the resulting token independently;
+run it N times to build an N-account pool, then set
+`FREEBUFF_TOKEN=tok1,tok2,...,tokN` in `.env` and restart the gateway.
+
 ## Environment variables
 
 Required:

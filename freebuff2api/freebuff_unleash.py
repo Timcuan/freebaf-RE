@@ -199,6 +199,9 @@ class UnleashPool:
         self._next_account: dict[str, int] = {m: 0 for m in models}
         # Per-account quota/health registry
         self.health = AccountHealthRegistry(account_pool.account_count)
+        # In-flight warmup tasks: (account_index, model) -> Task
+        # Prevents duplicate session creation when warmup ticks overlap.
+        self._inflight: dict[tuple[int, str], asyncio.Task] = {}
 
     async def acquire(
         self,
@@ -389,11 +392,20 @@ class UnleashPool:
                     continue
 
                 slot = self._slots[i].get(model)
+                key = (i, model)
                 if slot is None:
-                    # Create missing session (fire-and-forget; errors logged)
-                    asyncio.create_task(self._create_one(i, model))
+                    # Create missing session — dedup against in-flight task
+                    if key in self._inflight and not self._inflight[key].done():
+                        continue  # already warming up
+                    task = asyncio.create_task(self._create_one(i, model))
+                    self._inflight[key] = task
+                    task.add_done_callback(lambda t, k=key: self._inflight.pop(k, None))
                 elif slot.needs_preemptive_refresh:
-                    asyncio.create_task(self.refresh_session(i, model))
+                    if key in self._inflight and not self._inflight[key].done():
+                        continue  # refresh already running
+                    task = asyncio.create_task(self.refresh_session(i, model))
+                    self._inflight[key] = task
+                    task.add_done_callback(lambda t, k=key: self._inflight.pop(k, None))
 
     async def _create_one(self, account_index: int, model: str) -> None:
         """Helper for fire-and-forget warmup creation on a specific account."""

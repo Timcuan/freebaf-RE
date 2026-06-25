@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from .codebuff import CodebuffAccountPool, CodebuffClient, CodebuffError
 from .config import DEFAULT_ADMIN_KEY, Settings, project_env_path, write_env_values
 from .logging_config import get_buffered_logs
+from .login_flow import poll_login, start_login, verify_token_sync
 from .models import DEFAULT_MODEL, models_response
 from .usage import ApiKeyRecord
 from .usage_store import ApiKeyStore, RequestStore
@@ -458,6 +459,171 @@ async def delete_token(request: Request, index: int) -> dict[str, Any]:
     return _api_ok(await _save_token_list(request, tokens), "token deleted")
 
 
+# ── Login Flow (web UI direct login, bypasses CLI single-profile limit) ──
+
+
+import asyncio
+import time as _time
+import uuid as _uuid
+
+_LOGIN_SESSIONS: dict[str, dict[str, Any]] = {}
+_LOGIN_SESSION_TTL = 10 * 60  # 10 min idle timeout for the browser to complete
+_LOGIN_SESSIONS_LOCK = asyncio.Lock()
+
+
+async def _prune_login_sessions() -> None:
+    now = _time.time()
+    stale = [sid for sid, s in _LOGIN_SESSIONS.items() if now - s.get("last_touched", 0) > _LOGIN_SESSION_TTL]
+    for sid in stale:
+        s = _LOGIN_SESSIONS.pop(sid, None)
+        task = s.get("task") if s else None
+        if task and not task.done():
+            task.cancel()
+
+
+def _prune_login_sessions_sync() -> None:
+    """Sync prune — used inside lock-protected sections."""
+    now = _time.time()
+    stale = [sid for sid, s in _LOGIN_SESSIONS.items() if now - s.get("last_touched", 0) > _LOGIN_SESSION_TTL]
+    for sid in stale:
+        _LOGIN_SESSIONS.pop(sid, None)
+
+
+@router.post("/admin/api/login-flow/start")
+async def login_flow_start(request: Request, mode: str = "freebuff") -> dict[str, Any]:
+    _check_admin_auth(request)
+    if mode not in ("freebuff", "codebuff"):
+        raise HTTPException(status_code=400, detail="mode must be 'freebuff' or 'codebuff'")
+    try:
+        start_result = await start_login(mode)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"upstream login code request failed: {error}")
+    session_id = _uuid.uuid4().hex
+    async with _LOGIN_SESSIONS_LOCK:
+        _prune_login_sessions_sync()
+        _LOGIN_SESSIONS[session_id] = {
+            "session_id": session_id,
+            "mode": mode,
+            "start": start_result,
+            "status": "pending",
+            "user": None,
+            "error": None,
+            "created_at": _time.time(),
+            "last_touched": _time.time(),
+            "task": None,
+        }
+    # Launch background poller
+    async def _runner():
+        async with _LOGIN_SESSIONS_LOCK:
+            s = _LOGIN_SESSIONS.get(session_id)
+            if s is None:
+                return
+        try:
+            user = await poll_login(start_result, mode=mode)
+            async with _LOGIN_SESSIONS_LOCK:
+                s = _LOGIN_SESSIONS.get(session_id)
+                if s is None:
+                    return
+                s["user"] = {
+                    "user_id": user.user_id,
+                    "email": user.email,
+                    "name": user.name,
+                    "auth_token": user.auth_token,
+                }
+                s["status"] = "success"
+        except TimeoutError as e:
+            async with _LOGIN_SESSIONS_LOCK:
+                s = _LOGIN_SESSIONS.get(session_id)
+                if s:
+                    s["status"] = "timeout"
+                    s["error"] = str(e)
+        except asyncio.CancelledError:
+            async with _LOGIN_SESSIONS_LOCK:
+                s = _LOGIN_SESSIONS.get(session_id)
+                if s:
+                    s["status"] = "cancelled"
+            raise
+        except Exception as e:
+            async with _LOGIN_SESSIONS_LOCK:
+                s = _LOGIN_SESSIONS.get(session_id)
+                if s:
+                    s["status"] = "error"
+                    s["error"] = str(e)
+        finally:
+            async with _LOGIN_SESSIONS_LOCK:
+                s = _LOGIN_SESSIONS.get(session_id)
+                if s:
+                    s["last_touched"] = _time.time()
+
+    task = asyncio.create_task(_runner())
+    async with _LOGIN_SESSIONS_LOCK:
+        if session_id in _LOGIN_SESSIONS:
+            _LOGIN_SESSIONS[session_id]["task"] = task
+    return _api_ok(
+        {
+            "session_id": session_id,
+            "login_url": start_result.login_url,
+            "expires_at": start_result.expires_at,
+            "mode": mode,
+            "status": "pending",
+        }
+    )
+
+
+@router.get("/admin/api/login-flow/poll/{session_id}")
+async def login_flow_poll(request: Request, session_id: str) -> dict[str, Any]:
+    _check_admin_auth(request)
+    async with _LOGIN_SESSIONS_LOCK:
+        _prune_login_sessions_sync()
+        s = _LOGIN_SESSIONS.get(session_id)
+        if s is None:
+            raise HTTPException(status_code=404, detail="login session not found")
+        s["last_touched"] = _time.time()
+        snapshot = {"status": s["status"], "user": s["user"], "error": s["error"], "mode": s["mode"]}
+    return _api_ok({"session_id": session_id, **snapshot})
+
+
+@router.post("/admin/api/login-flow/commit/{session_id}")
+async def login_flow_commit(request: Request, session_id: str) -> dict[str, Any]:
+    """Add the harvested token to the pool and persist to .env."""
+    _check_admin_auth(request)
+    async with _LOGIN_SESSIONS_LOCK:
+        s = _LOGIN_SESSIONS.get(session_id)
+        if s is None:
+            raise HTTPException(status_code=404, detail="login session not found")
+        if s["status"] != "success" or not s["user"]:
+            raise HTTPException(status_code=400, detail=f"login session status is '{s['status']}', cannot commit")
+        token = s["user"]["auth_token"]
+    # Auto-verify before adding
+    ok, info = verify_token_sync(token)
+    if not ok:
+        raise HTTPException(status_code=402, detail=f"token rejected by upstream: {info}")
+    tokens = _tokens(_settings(request))
+    if token in tokens:
+        # Already present — idempotent
+        async with _LOGIN_SESSIONS_LOCK:
+            _LOGIN_SESSIONS.pop(session_id, None)
+        return _api_ok(await _save_token_list(request, tokens), "token already in pool")
+    tokens.append(token)
+    result = await _save_token_list(request, tokens)
+    async with _LOGIN_SESSIONS_LOCK:
+        _LOGIN_SESSIONS.pop(session_id, None)
+    return _api_ok(result, "login committed and token added to pool")
+
+
+@router.post("/admin/api/login-flow/cancel/{session_id}")
+async def login_flow_cancel(request: Request, session_id: str) -> dict[str, Any]:
+    _check_admin_auth(request)
+    async with _LOGIN_SESSIONS_LOCK:
+        s = _LOGIN_SESSIONS.pop(session_id, None)
+    if s is None:
+        raise HTTPException(status_code=404, detail="login session not found")
+    task = s.get("task")
+    if task and not task.done():
+        task.cancel()
+    return _api_ok({"session_id": session_id}, "login session cancelled")
+
+
 @router.put("/admin/api/api-key")
 async def save_api_key(request: Request) -> dict[str, Any]:
     _check_admin_auth(request)
@@ -521,7 +687,11 @@ async def chat_test(request: Request) -> dict[str, Any]:
     lease = await request.app.state.accounts.acquire_session(model_config.session_id, messages)
     try:
         await lease.client.validate_agents()
-        await lease.client.request_ad_chain(messages=messages)
+        await lease.client.request_ad_chain(
+            messages=messages,
+            session_instance_id=lease.session.instance_id,
+            cache=lease.sessions._ad_chain_cache,
+        )
         run = await _start_freebuff_run_chain(lease.client, model_config)
         payload = build_upstream_payload(
             {"model": model_config.id, "messages": messages, "stream": False},

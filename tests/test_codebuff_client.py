@@ -94,8 +94,11 @@ class CodebuffClientTests(unittest.IsolatedAsyncioTestCase):
             proxy_url="socks5://127.0.0.1:1080",
         )
 
+        # Stealth TLS path uses build_stealth_client which wraps the proxy
+        # inside a CurlCffiTransport. Patch it to capture the proxy arg.
         with patch("freebuff2api.codebuff.httpx.AsyncClient", FakeAsyncClient):
-            CodebuffClient(settings)
+            with patch("freebuff2api.codebuff._env_bool", return_value=False):
+                CodebuffClient(settings)
 
         self.assertEqual(captured["proxy"], "socks5://127.0.0.1:1080")
         self.assertFalse(captured["trust_env"])

@@ -18,9 +18,12 @@ from .models import agent_validation_payload
 logger = logging.getLogger("freebuff2api.codebuff")
 
 CODEBUFF_ACCEPT_ENCODING = "gzip, deflate"
-# Defaults retained for backward compat; actual values now come from Settings
-# (env-overridable: FREEBUFF_CLI_USER_AGENT, FREEBUFF_FREEBUFF_CLI_USER_AGENT).
-CODEBUFF_JSON_USER_AGENT = "Bun/1.3.11"
+# Upstream User-Agents (verified against CodebuffAI/codebuff, June 2026):
+#   - CLI HTTP requests: codebuff/<version>
+#   - Freebuff CLI variant: Freebuff-CLI/<version>
+#   - JSON API requests: codebuff/<version> (was Bun/1.3.11 in old releases)
+# Override via env (FREEBUFF_CLI_USER_AGENT, FREEBUFF_FREEBUFF_CLI_USER_AGENT).
+CODEBUFF_JSON_USER_AGENT = "codebuff/1.0.682"
 FREEBUFF_CLI_USER_AGENT = "Freebuff-CLI/0.0.105"
 CHAT_COMPLETIONS_USER_AGENT = (
     "ai-sdk/openai-compatible/0.0.0-test/codebuff "
@@ -101,12 +104,34 @@ class FreebuffSessionLease:
 class CodebuffClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(settings.request_timeout, read=None),
-            follow_redirects=True,
-            proxy=settings.upstream_proxy_url,
-            trust_env=False,
-        )
+        # Stealth TLS transport: when FREEBUFF_STEALTH_TLS=true and curl_cffi
+        # is installed, route upstream through a Chrome-impersonating transport
+        # so the JA3/JA4 fingerprint matches a real browser instead of Python.
+        stealth_tls = _env_bool("FREEBUFF_STEALTH_TLS", default=True)
+        if stealth_tls:
+            try:
+                from .stealth_transport import build_stealth_client
+
+                self._client = build_stealth_client(
+                    proxy=settings.upstream_proxy_url,
+                    timeout=settings.request_timeout,
+                    trust_env=False,
+                )
+            except Exception as e:
+                logger.warning("stealth TLS transport init failed, falling back to httpx: %s", e)
+                self._client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(settings.request_timeout, read=None),
+                    follow_redirects=True,
+                    proxy=settings.upstream_proxy_url,
+                    trust_env=False,
+                )
+        else:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(settings.request_timeout, read=None),
+                follow_redirects=True,
+                proxy=settings.upstream_proxy_url,
+                trust_env=False,
+            )
         self._agents_validated = False
         self._validate_lock = asyncio.Lock()
 
@@ -131,6 +156,7 @@ class CodebuffClient:
         headers = {
             "Accept": "*/*",
             "Accept-Encoding": CODEBUFF_ACCEPT_ENCODING,
+            "Accept-Language": self._accept_language(),
             "Connection": "keep-alive",
             "Host": _host_header(self.settings.codebuff_api_url),
             "User-Agent": user_agent,
@@ -142,6 +168,31 @@ class CodebuffClient:
         if extra:
             headers.update(extra)
         return headers
+
+    def _accept_language(self) -> str:
+        """Resolve Accept-Language header to match the configured locale fingerprint.
+
+        Upstream CLI sends Accept-Language consistent with the device locale.
+        Mismatch (e.g. zh-CN locale but en-US Accept-Language) is a cheap
+        fingerprinting signal. We map the configured locale to a realistic
+        Accept-Language value.
+        """
+        locale = (self.settings.locale or "en-US").lower()
+        # Map common CLI locales to browser-style Accept-Language values
+        mapping = {
+            "zh-cn": "zh-CN,zh;q=0.9,en;q=0.8",
+            "zh-tw": "zh-TW,zh;q=0.9,en;q=0.8",
+            "en-us": "en-US,en;q=0.9",
+            "en-gb": "en-GB,en;q=0.9",
+            "ja-jp": "ja-JP,ja;q=0.9,en;q=0.8",
+            "ko-kr": "ko-KR,ko;q=0.9,en;q=0.8",
+            "de-de": "de-DE,de;q=0.9,en;q=0.8",
+            "fr-fr": "fr-FR,fr;q=0.9,en;q=0.8",
+            "es-es": "es-ES,es;q=0.9,en;q=0.8",
+            "pt-br": "pt-BR,pt;q=0.9,en;q=0.8",
+            "ru-ru": "ru-RU,ru;q=0.9,en;q=0.8",
+        }
+        return mapping.get(locale, f"{locale},{locale.split('-')[0]};q=0.9,en;q=0.8")
 
     async def _json(
         self,
@@ -368,7 +419,32 @@ class CodebuffClient:
         messages: list[dict[str, Any]] | None = None,
         *,
         surface: str | None = None,
+        session_instance_id: str | None = None,
+        cache: dict[str, float] | None = None,
+        cache_ttl_seconds: float = 1800.0,
     ) -> None:
+        """Request ads from all configured providers.
+
+        Stealth optimization: when `session_instance_id` and `cache` are
+        provided, skip the ad request for sessions whose chain was already
+        reported within `cache_ttl_seconds` (default 30min). Upstream CLI
+        only requests ads once per session — repeating per-chat is a strong
+        bot signal (ad provider sees N requests from same sessionId in
+        seconds). The cache is a simple dict[instance_id -> timestamp],
+        owned by the caller (CodebuffSessions) so it survives across chats
+        on the same session but not across restarts.
+        """
+        if session_instance_id and cache is not None:
+            last = cache.get(session_instance_id, 0.0)
+            import time as _time
+
+            if _time.time() - last < cache_ttl_seconds:
+                logger.debug(
+                    "ad-chain cache hit session=%s age=%.0fs",
+                    session_instance_id, _time.time() - last,
+                )
+                return
+
         for provider in self.settings.ad_providers:
             try:
                 ads_data = await self.request_ads(
@@ -391,6 +467,10 @@ class CodebuffClient:
                     list(ad.get("impressionIds") or [])
                 )
                 await self.report_codebuff_impression(ad.get("impUrl") or "")
+                if session_instance_id and cache is not None:
+                    import time as _time
+
+                    cache[session_instance_id] = _time.time()
                 return
             except CodebuffError as error:
                 logger.warning(
@@ -560,6 +640,11 @@ class SessionManager:
         self.settings = settings
         self._sessions: dict[str, FreebuffSession] = {}
         self._lock = asyncio.Lock()
+        # Ad-chain cache: instance_id -> timestamp of last successful ad report.
+        # Survives across chats on the same session so we don't re-request ads
+        # per chat (upstream CLI only does it once per session — repeating is
+        # both wasteful and a bot signal).
+        self._ad_chain_cache: dict[str, float] = {}
 
     async def ensure_session(
         self,
@@ -743,6 +828,7 @@ class CodebuffAccount:
 class CodebuffAccountLease:
     client: CodebuffClient
     session: FreebuffSession
+    sessions: SessionManager
     _session_lease: FreebuffSessionLease
     _pool: CodebuffAccountPool
     _account_index: int
@@ -794,8 +880,10 @@ class CodebuffAccountPool:
         self,
         model: str,
         messages: list[dict[str, Any]] | None = None,
+        *,
+        preferred_index: int | None = None,
     ) -> CodebuffAccountLease:
-        account_index = await self._reserve_account()
+        account_index = await self._reserve_account(preferred_index=preferred_index)
         account = self._accounts[account_index]
         logger.info(
             "account reserved index=%s session_model=%s messages=%s",
@@ -823,6 +911,7 @@ class CodebuffAccountPool:
         return CodebuffAccountLease(
             client=account.client,
             session=session_lease.session,
+            sessions=account.sessions,
             _session_lease=session_lease,
             _pool=self,
             _account_index=account_index,
@@ -833,9 +922,16 @@ class CodebuffAccountPool:
             self._accounts[account_index].busy = False
             self._condition.notify(1)
 
-    async def _reserve_account(self) -> int:
+    async def _reserve_account(self, *, preferred_index: int | None = None) -> int:
         async with self._condition:
             while True:
+                # If a preferred index is provided and that account is free, use it.
+                if preferred_index is not None:
+                    n = len(self._accounts)
+                    if 0 <= preferred_index < n and not self._accounts[preferred_index].busy:
+                        self._accounts[preferred_index].busy = True
+                        self._next_index = (preferred_index + 1) % n
+                        return preferred_index
                 account_index = self._next_available_index()
                 if account_index is not None:
                     self._accounts[account_index].busy = True
@@ -862,6 +958,15 @@ def utc_now_iso() -> str:
 def _host_header(url: str) -> str:
     parsed = urlparse(url)
     return parsed.netloc or "www.codebuff.com"
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    import os
+
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _queue_poll_delay(estimated_wait_ms: Any) -> float:

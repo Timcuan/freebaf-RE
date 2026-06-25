@@ -12,10 +12,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# Browser UA used for ad-provider requests. Mirrors a current Chrome release.
 HAR_BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    "Chrome/137.0.0.0 Safari/537.36"
 )
 
 DEFAULT_ADMIN_KEY = "sk-admin"
@@ -73,8 +74,10 @@ class Settings:
     egress_auto: bool = True  # auto-detect region + warn if non-premium
     # Deployment mode (auto-detected)
     deploy_mode: str = "local"  # "local" | "vps" | "vercel" | "unknown"
-    # CLI version externalization (was hardcoded Bun/1.3.11)
-    cli_user_agent: str = "Bun/1.3.11"
+    # CLI version externalization.
+    # Default matches latest verified CLI release (codebuff@1.0.682, June 2026).
+    # Override via FREEBUFF_CLI_USER_AGENT to track upstream bumps.
+    cli_user_agent: str = "codebuff/1.0.682"
     freebuff_cli_user_agent: str = "Freebuff-CLI/0.0.105"
 
     @property
@@ -187,7 +190,7 @@ def load_settings() -> Settings:
         egress_proxy_url=os.getenv("FREEBUFF_EGRESS_PROXY_URL"),
         egress_auto=_bool("FREEBUFF_EGRESS_AUTO", True),
         deploy_mode=os.getenv("FREEBUFF_DEPLOY_MODE") or _detect_deploy_mode(),
-        cli_user_agent=os.getenv("FREEBUFF_CLI_USER_AGENT", "Bun/1.3.11"),
+        cli_user_agent=os.getenv("FREEBUFF_CLI_USER_AGENT", "codebuff/1.0.682"),
         freebuff_cli_user_agent=os.getenv("FREEBUFF_FREEBUFF_CLI_USER_AGENT", "Freebuff-CLI/0.0.105"),
     )
 
@@ -219,34 +222,8 @@ def write_env_values(values: dict[str, str | None], env_path: Path | None = None
         if value is not None:
             output.append(f"{name}={value}")
 
-    path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
-
-
-def project_env_path() -> Path:
-    return Path(__file__).resolve().parents[1] / ".env"
-
-
-def write_env_values(values: dict[str, str | None], env_path: Path | None = None) -> None:
-    path = env_path or project_env_path()
-    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    pending = dict(values)
-    output: list[str] = []
-
-    for line in existing:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
-            output.append(line)
-            continue
-        name = line.split("=", 1)[0].strip()
-        if name in pending:
-            value = pending.pop(name)
-            if value is not None:
-                output.append(f"{name}={value}")
-            continue
-        output.append(line)
-
-    for name, value in pending.items():
-        if value is not None:
-            output.append(f"{name}={value}")
-
-    path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    # Atomic write: temp file + rename to avoid corruption on crash.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".env.tmp")
+    tmp.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    os.replace(tmp, path)
