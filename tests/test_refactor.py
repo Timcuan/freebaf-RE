@@ -24,7 +24,7 @@ class ModelAliasTests(unittest.TestCase):
 
     def test_glm_5_2_resolves_to_glm_5_1_upstream(self) -> None:
         m = resolve_model("zai/glm-5.2")
-        self.assertEqual(m.upstream_model_id, "zai/glm-5.1")
+        self.assertEqual(m.upstream_model_id, "z-ai/glm-5.1")
         self.assertEqual(m.agent_id, "base2-free-glm-5-1")
 
     def test_z_ai_alias_resolves(self) -> None:

@@ -66,9 +66,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.request_store = request_store
     app.state.api_key_store = api_key_store
     logger.info("configured freebuff accounts count=%s api_keys=%s", accounts.account_count, api_key_store.total_count)
+
+    # GLM 5.2 unleash — bypass deployment-hours via session persistence + multi-account
+    glm_pool = None
+    if settings.codebuff_tokens:
+        try:
+            from .glm52_unleash import unleash_init
+            glm_pool = await unleash_init(settings, accounts)
+            app.state.glm_pool = glm_pool
+            logger.info("glm52 unleash active: %s", glm_pool.status())
+        except Exception as e:
+            logger.warning("glm52 unleash init failed: %s", e)
+
+    # Cloudflare Workers AI — free GLM 5.2 via CF (10k neurons/day per account)
+    cf_client = None
+    if settings.cf_account_ids and settings.cf_api_tokens:
+        try:
+            from .cloudflare_ai import CloudflareAIClient
+            cf_client = CloudflareAIClient(settings)
+            app.state.cf_client = cf_client
+            logger.info("cloudflare workers ai enabled accounts=%s remaining_neurons=%s",
+                        cf_client.account_count, cf_client.total_remaining_neurons)
+        except Exception as e:
+            logger.warning("cloudflare ai init failed: %s", e)
+
     try:
         yield
     finally:
+        if glm_pool:
+            await glm_pool.stop_warmup_task()
+        if cf_client:
+            await cf_client.aclose()
         await accounts.aclose()
 
 
@@ -227,29 +255,59 @@ async def health_upstream(request: Request) -> dict[str, Any]:
         return {"status": "error", "reachable": False, "error": str(e)[:200]}
 
 
+@app.get("/api/health/glm52")
+async def health_glm52(request: Request) -> dict[str, Any]:
+    """GLM 5.2 unleash status — session pool + deployment hours."""
+    _check_local_auth(request)
+    settings = _settings(request)
+    glm_pool = getattr(request.app.state, "glm_pool", None)
+    cf_client = getattr(request.app.state, "cf_client", None)
+
+    from .glm52_unleash import is_glm_deployment_hours, next_deployment_window
+
+    result: dict[str, Any] = {
+        "in_deployment_hours": is_glm_deployment_hours(),
+        "next_window": next_deployment_window().isoformat(),
+        "unleash_active": glm_pool is not None,
+        "cf_active": cf_client is not None,
+        "cf_enabled_config": bool(settings.cf_account_ids and settings.cf_api_tokens),
+    }
+    if glm_pool:
+        result["unleash_pool"] = glm_pool.status()
+    if cf_client:
+        result["cloudflare"] = cf_client.status()
+    return result
+
+
 @app.get("/v1/models")
 async def list_models(request: Request) -> dict[str, Any]:
     _check_local_auth(request, require_configured=True)
-    return models_response()
+    settings = _settings(request)
+    cf_enabled = bool(settings.cf_account_ids and settings.cf_api_tokens)
+    return models_response(cf_enabled=cf_enabled)
 
 
 @app.get("/v1/models/{model_id:path}")
 async def get_model(request: Request, model_id: str) -> dict[str, Any]:
     _check_local_auth(request, require_configured=True)
-    result = model_response(model_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
-    return result
+    settings = _settings(request)
+    cf_enabled = bool(settings.cf_account_ids and settings.cf_api_tokens)
+    from .models import all_models_with_cf
+    for m in all_models_with_cf(cf_enabled):
+        if m.id == model_id:
+            return {"id": m.id, "object": "model", "created": 0,
+                    "owned_by": m.owned_by, "provider": m.provider}
+    raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request) -> Any:
     api_key = _check_local_auth(request, require_configured=True)
-    _check_freebuff_token(request)
     body = await request.json()
     settings = _settings(request)
+    cf_enabled = bool(settings.cf_account_ids and settings.cf_api_tokens)
     try:
-        model_config = resolve_model(body.get("model"))
+        model_config = resolve_model(body.get("model"), cf_enabled=cf_enabled)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     model = model_config.id
@@ -265,11 +323,48 @@ async def chat_completions(request: Request) -> Any:
             },
         )
     logger.info(
-        "chat completion request model=%s stream=%s messages=%s",
+        "chat completion request model=%s provider=%s stream=%s messages=%s",
         model,
+        model_config.provider,
         body.get("stream") is True,
         len(body.get("messages") or []),
     )
+
+    # Route to Cloudflare Workers AI if model.provider == "cloudflare"
+    # Skip FREEBUFF_TOKEN check — CF path doesn't need Codebuff token
+    if model_config.provider == "cloudflare":
+        cf_client = getattr(request.app.state, "cf_client", None)
+        if cf_client is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Cloudflare Workers AI not configured. Set FREEBUFF_CF_ACCOUNT_IDS + FREEBUFF_CF_API_TOKENS.",
+            )
+        try:
+            if body.get("stream") is True:
+                async def cf_stream() -> AsyncIterator[bytes]:
+                    async for chunk in await cf_client.chat_completions(body, stream=True):
+                        yield chunk
+                return StreamingResponse(
+                    cf_stream(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache, no-transform",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            data = await cf_client.chat_completions(body, stream=False)
+            return JSONResponse(content=data)
+        except Exception as error:
+            logger.warning("cf chat completion failed: %s", error)
+            if not settings.cf_fallback_to_codebuff:
+                return _error_response(error)
+            logger.info("falling back to codebuff for model=%s", model)
+            # Continue to codebuff path below
+
+    # Codebuff path — require token
+    _check_freebuff_token(request)
+
     if settings.debug:
         logger.debug(
             "incoming request headers=%s",

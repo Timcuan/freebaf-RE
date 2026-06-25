@@ -11,6 +11,8 @@ class FreebuffModel:
     upstream_model_id: str | None = None
     session_model_id: str | None = None
     parent_agent_id: str | None = None
+    # Provider routing: "codebuff" (default) or "cloudflare" (CF Workers AI free)
+    provider: str = "codebuff"
 
     @property
     def upstream_id(self) -> str:
@@ -31,18 +33,19 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
     FreebuffModel("mimo/mimo-v2.5-pro", "base2-free-mimo-pro"),
     # GLM 5.1 — free tier, deployment hours 9am ET-5pm PT weekdays
     # Upstream auto-routes GLM-5.1 -> GLM-5.2 per Z.AI docs (1M context, 3x peak / 2x off-peak quota)
-    FreebuffModel("zai/glm-5.1", "base2-free-glm-5-1", owned_by="zai"),
+    # Upstream agent_id: base2-free (root orchestrator allows glm-5.1)
+    FreebuffModel("zai/glm-5.1", "base2-free-glm-5-1", owned_by="zai",
+                  upstream_model_id="z-ai/glm-5.1"),
     FreebuffModel("zai/glm-5.2", "base2-free-glm-5-1", owned_by="zai",
-                  upstream_model_id="zai/glm-5.1"),
+                  upstream_model_id="z-ai/glm-5.1"),
     # Common alias forms clients may send
-    FreebuffModel("z-ai/glm-5.1", "base2-free-glm-5-1", owned_by="zai",
-                  upstream_model_id="zai/glm-5.1"),
+    FreebuffModel("z-ai/glm-5.1", "base2-free-glm-5-1", owned_by="zai"),
     FreebuffModel("z-ai/glm-5.2", "base2-free-glm-5-1", owned_by="zai",
-                  upstream_model_id="zai/glm-5.1"),
+                  upstream_model_id="z-ai/glm-5.1"),
     FreebuffModel("glm-5.2", "base2-free-glm-5-1", owned_by="zai",
-                  upstream_model_id="zai/glm-5.1"),
+                  upstream_model_id="z-ai/glm-5.1"),
     FreebuffModel("glm-5.1", "base2-free-glm-5-1", owned_by="zai",
-                  upstream_model_id="zai/glm-5.1"),
+                  upstream_model_id="z-ai/glm-5.1"),
 )
 
 DEFAULT_MODEL = FREEBUFF_MODELS[0]
@@ -78,6 +81,26 @@ GEMINI_FREE_MODELS: tuple[FreebuffModel, ...] = (
 
 ALL_MODELS = FREEBUFF_MODELS + GEMINI_FREE_MODELS
 
+# Cloudflare Workers AI free models (10k neurons/day per account)
+# Available when FREEBUFF_CF_ACCOUNT_IDS + FREEBUFF_CF_API_TOKENS configured.
+# Routing: provider="cloudflare" bypasses Codebuff deployment-hours entirely.
+CLOUDFLARE_FREE_MODELS: tuple[FreebuffModel, ...] = (
+    FreebuffModel(
+        "cf/glm-5.2", "cf-zai-glm-5-2", owned_by="cloudflare",
+        upstream_model_id="@cf/zai-org/glm-5.2", provider="cloudflare",
+    ),
+    FreebuffModel(
+        "cf/glm-5.2-fp8", "cf-zai-glm-5-2-fp8", owned_by="cloudflare",
+        upstream_model_id="@cf/zai-org/glm-5.2-fp8", provider="cloudflare",
+    ),
+)
+
+def all_models_with_cf(cf_enabled: bool = False) -> tuple[FreebuffModel, ...]:
+    """Return all models, optionally including Cloudflare free variants."""
+    if cf_enabled:
+        return ALL_MODELS + CLOUDFLARE_FREE_MODELS
+    return ALL_MODELS
+
 # Alias map: normalized (lowercase, no slash) -> canonical model id
 _MODEL_ALIASES: dict[str, str] = {}
 for _m in ALL_MODELS:
@@ -99,12 +122,15 @@ _MODEL_ALIASES["gemini-pro"] = "google/gemini-3.1-pro-preview"
 del _m
 
 
-def resolve_model(requested: str | None) -> FreebuffModel:
+def resolve_model(requested: str | None, cf_enabled: bool = False) -> FreebuffModel:
+    """Resolve model by ID or alias. If cf_enabled, include Cloudflare variants."""
+    pool = all_models_with_cf(cf_enabled) if cf_enabled else ALL_MODELS
+
     if not requested:
         return DEFAULT_MODEL
 
     # Direct match.
-    for model in ALL_MODELS:
+    for model in pool:
         if model.id == requested:
             return model
 
@@ -114,14 +140,14 @@ def resolve_model(requested: str | None) -> FreebuffModel:
                       requested.split("/")[-1].lower()):
         if normalize in _MODEL_ALIASES:
             canonical = _MODEL_ALIASES[normalize]
-            for model in ALL_MODELS:
+            for model in pool:
                 if model.id == canonical:
                     return model
 
     raise ValueError(f"Unsupported Freebuff model: {requested}")
 
 
-def models_response() -> dict[str, object]:
+def models_response(cf_enabled: bool = False) -> dict[str, object]:
     return {
         "object": "list",
         "data": [
@@ -130,8 +156,9 @@ def models_response() -> dict[str, object]:
                 "object": "model",
                 "created": 0,
                 "owned_by": model.owned_by,
+                "provider": model.provider,
             }
-            for model in ALL_MODELS
+            for model in all_models_with_cf(cf_enabled)
         ],
     }
 
