@@ -11,7 +11,7 @@ import uuid
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .admin import router as admin_router
+from .admin import router as admin_router, _check_admin_auth as _check_admin_auth_request
 from .codebuff import (
     CodebuffAccountLease,
     CodebuffAccountPool,
@@ -259,7 +259,7 @@ async def health_egress(request: Request) -> dict[str, Any]:
 
     Auth: requires admin key (FREEBUFF_ADMIN_KEY) since exposes IP info.
     """
-    _check_local_auth(request)
+    _check_admin_auth_request(request)
     from .egress_region import verify_premium_egress
     settings = _settings(request)
     return await verify_premium_egress(settings)
@@ -271,7 +271,7 @@ async def health_stealth(request: Request) -> dict[str, Any]:
 
     Auth: requires admin key.
     """
-    _check_local_auth(request)
+    _check_admin_auth_request(request)
     settings = _settings(request)
     from .proxy_validation import validate_egress_for_upstream
     from .stealth_transport import is_stealth_transport_available, SUPPORTED_PROFILES, DEFAULT_PROFILE
@@ -336,7 +336,7 @@ async def health_upstream(request: Request) -> dict[str, Any]:
 @app.get("/api/health/glm52")
 async def health_glm52(request: Request) -> dict[str, Any]:
     """GLM 5.2 unleash status — session pool + deployment hours."""
-    _check_local_auth(request)
+    _check_admin_auth_request(request)
     settings = _settings(request)
     glm_pool = getattr(request.app.state, "unleash_pool", None) or getattr(request.app.state, "glm_pool", None)
     cf_client = None  # removed — Freebuff-only
@@ -415,7 +415,11 @@ async def chat_completions(request: Request) -> Any:
             messages=messages,
         )
         client = lease.client
-        await client.request_ad_chain(messages=messages)
+        await client.request_ad_chain(
+            messages=messages,
+            session_instance_id=lease.session.instance_id,
+            cache=lease.sessions._ad_chain_cache,
+        )
         await client.validate_agents()
         run = await _start_freebuff_run_chain(client, model_config)
         trace_session_id = str(uuid.uuid4())
@@ -816,7 +820,10 @@ async def anthropic_messages(request: Request) -> Any:
             model_config.session_id,
         )
         client = lease.client
-        await client.request_ad_chain()
+        await client.request_ad_chain(
+            session_instance_id=lease.session.instance_id,
+            cache=lease.sessions._ad_chain_cache,
+        )
         await client.validate_agents()
         run = await _start_freebuff_run_chain(client, model_config)
         trace_session_id = str(uuid.uuid4())

@@ -419,7 +419,32 @@ class CodebuffClient:
         messages: list[dict[str, Any]] | None = None,
         *,
         surface: str | None = None,
+        session_instance_id: str | None = None,
+        cache: dict[str, float] | None = None,
+        cache_ttl_seconds: float = 1800.0,
     ) -> None:
+        """Request ads from all configured providers.
+
+        Stealth optimization: when `session_instance_id` and `cache` are
+        provided, skip the ad request for sessions whose chain was already
+        reported within `cache_ttl_seconds` (default 30min). Upstream CLI
+        only requests ads once per session — repeating per-chat is a strong
+        bot signal (ad provider sees N requests from same sessionId in
+        seconds). The cache is a simple dict[instance_id -> timestamp],
+        owned by the caller (CodebuffSessions) so it survives across chats
+        on the same session but not across restarts.
+        """
+        if session_instance_id and cache is not None:
+            last = cache.get(session_instance_id, 0.0)
+            import time as _time
+
+            if _time.time() - last < cache_ttl_seconds:
+                logger.debug(
+                    "ad-chain cache hit session=%s age=%.0fs",
+                    session_instance_id, _time.time() - last,
+                )
+                return
+
         for provider in self.settings.ad_providers:
             try:
                 ads_data = await self.request_ads(
@@ -442,6 +467,10 @@ class CodebuffClient:
                     list(ad.get("impressionIds") or [])
                 )
                 await self.report_codebuff_impression(ad.get("impUrl") or "")
+                if session_instance_id and cache is not None:
+                    import time as _time
+
+                    cache[session_instance_id] = _time.time()
                 return
             except CodebuffError as error:
                 logger.warning(
@@ -611,6 +640,11 @@ class SessionManager:
         self.settings = settings
         self._sessions: dict[str, FreebuffSession] = {}
         self._lock = asyncio.Lock()
+        # Ad-chain cache: instance_id -> timestamp of last successful ad report.
+        # Survives across chats on the same session so we don't re-request ads
+        # per chat (upstream CLI only does it once per session — repeating is
+        # both wasteful and a bot signal).
+        self._ad_chain_cache: dict[str, float] = {}
 
     async def ensure_session(
         self,
@@ -794,6 +828,7 @@ class CodebuffAccount:
 class CodebuffAccountLease:
     client: CodebuffClient
     session: FreebuffSession
+    sessions: SessionManager
     _session_lease: FreebuffSessionLease
     _pool: CodebuffAccountPool
     _account_index: int
@@ -874,6 +909,7 @@ class CodebuffAccountPool:
         return CodebuffAccountLease(
             client=account.client,
             session=session_lease.session,
+            sessions=account.sessions,
             _session_lease=session_lease,
             _pool=self,
             _account_index=account_index,
