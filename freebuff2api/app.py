@@ -192,6 +192,41 @@ async def healthz(request: Request) -> dict[str, Any]:
     return {"status": "ok"}
 
 
+@app.get("/api/health/egress")
+async def health_egress(request: Request) -> dict[str, Any]:
+    """Egress region diagnostic — check if upstream IP is premium-region.
+
+    Auth: requires admin key (FREEBUFF_ADMIN_KEY) since exposes IP info.
+    """
+    _check_local_auth(request)
+    from .egress_region import verify_premium_egress
+    settings = _settings(request)
+    return await verify_premium_egress(settings)
+
+
+@app.get("/api/health/upstream")
+async def health_upstream(request: Request) -> dict[str, Any]:
+    """Ping upstream codebuff.com — verify auth + connectivity."""
+    _check_local_auth(request, require_configured=True)
+    import httpx
+    settings = _settings(request)
+    client = _client(request)
+    try:
+        # Use existing client which has correct headers + proxy
+        resp = await client._client.get(
+            f"{settings.codebuff_api_url}/api/v1/freebuff/session",
+            headers=client._headers(require_auth=True),
+            timeout=10.0,
+        )
+        return {
+            "status": "ok" if resp.status_code < 400 else "upstream_error",
+            "status_code": resp.status_code,
+            "reachable": True,
+        }
+    except Exception as e:
+        return {"status": "error", "reachable": False, "error": str(e)[:200]}
+
+
 @app.get("/v1/models")
 async def list_models(request: Request) -> dict[str, Any]:
     _check_local_auth(request, require_configured=True)

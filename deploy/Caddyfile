@@ -1,0 +1,47 @@
+# freebuff2api — Caddy reverse proxy (auto HTTPS)
+
+# Replace api.example.com with your domain
+api.example.com {
+    encode gzip zstd
+
+    # Basic auth optional (in addition to FREEBUFF_API_KEY Bearer auth)
+    # basicauth /admin/* {
+    #     admin <bcrypt-hash>
+    # }
+
+    # Rate limit (optional, requires caddy-ratelimit plugin)
+    # rate_limit {
+    #     zone /v1/* 30r/m
+    # }
+
+    reverse_proxy 127.0.0.1:8000 {
+        # Streaming-friendly: flush immediately for SSE
+        flush_interval -1
+        transport http {
+            read_timeout 5m
+            write_timeout 5m
+        }
+    }
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        # CSP for admin panel — adjust as needed
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data:; font-src 'self' data:"
+    }
+
+    # Block .env access
+    @blocked path /.env /.git /*.pyc
+    respond @blocked 404
+
+    log {
+        output file /var/log/caddy/freebuff2api.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+        format json
+    }
+}

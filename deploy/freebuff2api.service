@@ -1,0 +1,34 @@
+[Unit]
+Description=freebuff2api — OpenAI-compatible adapter for Codebuff Freebuff
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=freebuff
+Group=freebuff
+WorkingDirectory=/opt/freebuff2api
+EnvironmentFile=/opt/freebuff2api/.env
+Environment=FREEBUFF_DEPLOY_MODE=vps
+Environment=FREEBUFF_HOST=127.0.0.1
+Environment=FREEBUFF_PORT=8000
+# Egress proxy (set in .env instead if you prefer):
+# Environment=FREEBUFF_EGRESS_PROXY_URL=socks5://user:pass@proxy.example.com:1080
+
+ExecStart=/opt/freebuff2api/.venv/bin/python /opt/freebuff2api/main.py
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=freebuff2api
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/freebuff2api/data
+PrivateTmp=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target

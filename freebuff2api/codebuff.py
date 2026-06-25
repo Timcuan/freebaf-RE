@@ -18,6 +18,8 @@ from .models import agent_validation_payload
 logger = logging.getLogger("freebuff2api.codebuff")
 
 CODEBUFF_ACCEPT_ENCODING = "gzip, deflate"
+# Defaults retained for backward compat; actual values now come from Settings
+# (env-overridable: FREEBUFF_CLI_USER_AGENT, FREEBUFF_FREEBUFF_CLI_USER_AGENT).
 CODEBUFF_JSON_USER_AGENT = "Bun/1.3.11"
 FREEBUFF_CLI_USER_AGENT = "Freebuff-CLI/0.0.105"
 CHAT_COMPLETIONS_USER_AGENT = (
@@ -90,12 +92,16 @@ class CodebuffClient:
         self,
         *,
         json_body: bool = False,
-        user_agent: str = CODEBUFF_JSON_USER_AGENT,
+        user_agent: str | None = None,
         require_auth: bool = True,
         extra: dict[str, str] | None = None,
     ) -> dict[str, str]:
         if require_auth and not self.settings.codebuff_token:
             raise CodebuffError("FREEBUFF_TOKEN or CODEBUFF_TOKEN is required", 500)
+
+        # Use settings.cli_user_agent (env-overridable) when caller doesn't pin
+        if user_agent is None:
+            user_agent = self.settings.cli_user_agent
 
         headers = {
             "Accept": "*/*",

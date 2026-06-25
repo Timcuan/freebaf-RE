@@ -1,0 +1,27 @@
+services:
+  freebuff2api:
+    build: .
+    image: freebuff2api:latest
+    container_name: freebuff2api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - FREEBUFF_DEPLOY_MODE=vps
+    volumes:
+      - ./data:/app/data           # persistent usage_store
+      - ./.env:/app/.env:ro        # config (read-only; admin writes via panel)
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/keep-warm"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # If behind Caddy/nginx reverse proxy, no need to expose port directly
+    # networks:
+    #   - proxy_net
+# networks:
+#   proxy_net:
+#     external: true

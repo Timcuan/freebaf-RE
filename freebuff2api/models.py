@@ -29,6 +29,20 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
     FreebuffModel("minimax/minimax-m3", "base2-free-minimax-m3"),
     FreebuffModel("mimo/mimo-v2.5", "base2-free-mimo"),
     FreebuffModel("mimo/mimo-v2.5-pro", "base2-free-mimo-pro"),
+    # GLM 5.1 — free tier, deployment hours 9am ET-5pm PT weekdays
+    # Upstream auto-routes GLM-5.1 -> GLM-5.2 per Z.AI docs (1M context, 3x peak / 2x off-peak quota)
+    FreebuffModel("zai/glm-5.1", "base2-free-glm-5-1", owned_by="zai"),
+    FreebuffModel("zai/glm-5.2", "base2-free-glm-5-1", owned_by="zai",
+                  upstream_model_id="zai/glm-5.1"),
+    # Common alias forms clients may send
+    FreebuffModel("z-ai/glm-5.1", "base2-free-glm-5-1", owned_by="zai",
+                  upstream_model_id="zai/glm-5.1"),
+    FreebuffModel("z-ai/glm-5.2", "base2-free-glm-5-1", owned_by="zai",
+                  upstream_model_id="zai/glm-5.1"),
+    FreebuffModel("glm-5.2", "base2-free-glm-5-1", owned_by="zai",
+                  upstream_model_id="zai/glm-5.1"),
+    FreebuffModel("glm-5.1", "base2-free-glm-5-1", owned_by="zai",
+                  upstream_model_id="zai/glm-5.1"),
 )
 
 DEFAULT_MODEL = FREEBUFF_MODELS[0]
@@ -64,6 +78,27 @@ GEMINI_FREE_MODELS: tuple[FreebuffModel, ...] = (
 
 ALL_MODELS = FREEBUFF_MODELS + GEMINI_FREE_MODELS
 
+# Alias map: normalized (lowercase, no slash) -> canonical model id
+_MODEL_ALIASES: dict[str, str] = {}
+for _m in ALL_MODELS:
+    _MODEL_ALIASES[_m.id.lower()] = _m.id
+    _MODEL_ALIASES[_m.id.lower().replace("/", "")] = _m.id
+    _MODEL_ALIASES[_m.id.lower().replace("/", "-")] = _m.id
+    _MODEL_ALIASES[_m.id.split("/")[-1].lower()] = _m.id
+# Common Claude Code / Cursor aliases
+_MODEL_ALIASES["claude-sonnet-4"] = DEFAULT_MODEL.id
+_MODEL_ALIASES["claude-sonnet-4-6"] = DEFAULT_MODEL.id
+_MODEL_ALIASES["claude-3-5-sonnet"] = DEFAULT_MODEL.id
+_MODEL_ALIASES["claude-3-7-sonnet"] = DEFAULT_MODEL.id
+_MODEL_ALIASES["gpt-4o"] = DEFAULT_MODEL.id
+_MODEL_ALIASES["gpt-4"] = DEFAULT_MODEL.id
+_MODEL_ALIASES["gpt-5"] = "deepseek/deepseek-v4-pro"
+_MODEL_ALIASES["gpt-5.2"] = "deepseek/deepseek-v4-pro"
+_MODEL_ALIASES["gemini-3.1-pro"] = "google/gemini-3.1-pro-preview"
+_MODEL_ALIASES["gemini-pro"] = "google/gemini-3.1-pro-preview"
+del _m
+
+
 def resolve_model(requested: str | None) -> FreebuffModel:
     if not requested:
         return DEFAULT_MODEL
@@ -72,6 +107,16 @@ def resolve_model(requested: str | None) -> FreebuffModel:
     for model in ALL_MODELS:
         if model.id == requested:
             return model
+
+    # Alias match (case-insensitive, slash-stripped).
+    key = requested.lower()
+    for normalize in (key, key.replace("/", ""), key.replace("/", "-"),
+                      requested.split("/")[-1].lower()):
+        if normalize in _MODEL_ALIASES:
+            canonical = _MODEL_ALIASES[normalize]
+            for model in ALL_MODELS:
+                if model.id == canonical:
+                    return model
 
     raise ValueError(f"Unsupported Freebuff model: {requested}")
 
