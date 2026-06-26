@@ -109,8 +109,9 @@ class LeaseSwitchModelClient:
 
 
 class PoolClient:
-    def __init__(self, settings) -> None:
+    def __init__(self, settings, *, identity=None) -> None:
         self.settings = settings
+        self.identity = identity
         self.closed = False
 
     async def aclose(self) -> None:

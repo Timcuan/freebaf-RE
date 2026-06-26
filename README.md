@@ -55,6 +55,51 @@ including the anti-abuse commits:
 | Heavy usage | 500 msgs/24h → +50 score | governor soft cap 40 msgs + 16 hours |
 | Plus-alias email | `user+abc123@` → +10 score | login flow uses real OAuth accounts (Google/GitHub), no aliases |
 | Email-digits / duck.com / handle-userN | +5/+10/+5 score | real OAuth accounts only |
+| **Cross-account correlation** | bot-sweep clusters accounts by shared IP, TLS, UA, timing | `account_identity.py` per-account proxy/TLS/UA/locale/timezone/phase |
+| **Activity phase** | concurrent activity across accounts = cluster signal | per-account stagger offset (FREEBUFF_ACCOUNT_STAGGER_MINUTES) |
+
+### Per-account identity isolation (multi-account stealth)
+
+When running multiple accounts from one gateway, the strongest detection
+vector is **cross-account correlation** — all accounts share egress IP,
+TLS JA3, User-Agent, and timing. Upstream's bot-sweep (commit #527)
+clusters accounts by these signals.
+
+`account_identity.py` assigns each account a distinct identity bundle:
+
+- **proxy** — `FREEBUFF_PER_ACCOUNT_PROXY` (distinct residential IP per account)
+- **TLS profile** — `FREEBUFF_PER_ACCOUNT_TLS` (rotates curl_cffi browser profiles)
+- **CLI version** — `FREEBUFF_PER_ACCOUNT_CLI_VERSION` (distinct User-Agent per account)
+- **locale** — `FREEBUFF_PER_ACCOUNT_LOCALE` (distinct Accept-Language)
+- **timezone** — `FREEBUFF_PER_ACCOUNT_TIMEZONE` (distinct device timezone)
+- **activity phase** — `FREEBUFF_ACCOUNT_STAGGER_MINUTES` (distributes activity across the hour)
+
+Status visible at `/api/health/stealth` (admin-auth required):
+
+```json
+{
+  "identity": [
+    {
+      "account_index": 0,
+      "proxy_url": "***",
+      "tls_profile": "chrome124",
+      "cli_version": "1.0.682",
+      "locale": "en-US",
+      "timezone": "America/New_York",
+      "activity_phase_minutes": 0,
+      "is_isolated": true
+    },
+    ...
+  ]
+}
+```
+
+**Recommended multi-account setup:**
+1. Login 3-5 accounts via `/admin` (web login flow)
+2. Set `FREEBUFF_PER_ACCOUNT_PROXY` to distinct residential proxies (one per account)
+3. Leave other identity fields at defaults (auto-rotate)
+4. Set `FREEBUFF_IDLE_WINDOW_HOURS=0,8` + `FREEBUFF_LOCAL_OFFSET_HOURS=-5` (US East sleep schedule)
+5. Verify at `/api/health/stealth` — `is_isolated: true` for all accounts
 
 ### Egress pre-flight
 

@@ -62,11 +62,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     api_key_store.load_from_settings(settings.api_keys_json, settings.local_api_key)
     app.state.settings = settings
     app.state.accounts = accounts
+    app.state.account_pool = accounts  # alias for stealth/identity diagnostics
     app.state.codebuff = accounts.default_client
     app.state.sessions = accounts.default_sessions
     app.state.request_store = request_store
     app.state.api_key_store = api_key_store
     logger.info("configured freebuff accounts count=%s api_keys=%s", accounts.account_count, api_key_store.total_count)
+    isolated = accounts.identity_registry.isolated_count
+    if accounts.identity_registry.isolation_enabled and isolated < accounts.account_count:
+        logger.warning(
+            "identity isolation ON but only %s/%s accounts have distinct proxies — "
+            "cross-account IP correlation risk. Set FREEBUFF_PER_ACCOUNT_PROXY.",
+            isolated, accounts.account_count,
+        )
 
     # Stealth pre-flight: verify egress lands in a premium region AND is not
     # hard-blocked by upstream's VPN/proxy detection (commit #709).
@@ -314,7 +322,7 @@ async def health_egress(request: Request) -> dict[str, Any]:
 
 @app.get("/api/health/stealth")
 async def health_stealth(request: Request) -> dict[str, Any]:
-    """Full stealth diagnostic: egress + privacy signals + rate governor.
+    """Full stealth diagnostic: egress + privacy signals + rate governor + identity.
 
     Auth: requires admin key.
     """
@@ -329,6 +337,11 @@ async def health_stealth(request: Request) -> dict[str, Any]:
     if governor:
         governor_status = governor.status()
 
+    identity_status = None
+    pool = getattr(request.app.state, "account_pool", None)
+    if pool and hasattr(pool, "identity_registry"):
+        identity_status = pool.identity_registry.status()
+
     return {
         "egress": egress,
         "stealth_tls": {
@@ -338,6 +351,7 @@ async def health_stealth(request: Request) -> dict[str, Any]:
             "enabled": _env_bool("FREEBUFF_STEALTH_TLS", default=True),
         },
         "rate_governor": governor_status,
+        "identity": identity_status,
         "fingerprint_store": str(_fingerprint_store_path()),
     }
 

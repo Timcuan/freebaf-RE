@@ -13,6 +13,7 @@ import httpx
 from .config import HAR_BROWSER_USER_AGENT, Settings
 from .logging_config import redact_headers, render_debug
 from .models import agent_validation_payload
+from .account_identity import AccountIdentity
 
 
 logger = logging.getLogger("freebuff2api.codebuff")
@@ -102,18 +103,28 @@ class FreebuffSessionLease:
 
 
 class CodebuffClient:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        identity: "AccountIdentity | None" = None,
+    ) -> None:
         self.settings = settings
+        self._identity = identity
         # Stealth TLS transport: when FREEBUFF_STEALTH_TLS=true and curl_cffi
         # is installed, route upstream through a Chrome-impersonating transport
         # so the JA3/JA4 fingerprint matches a real browser instead of Python.
+        # Per-account identity overrides global proxy/TLS profile.
+        proxy_url = identity.proxy_url if identity else settings.upstream_proxy_url
+        tls_profile = identity.tls_profile if identity else None
         stealth_tls = _env_bool("FREEBUFF_STEALTH_TLS", default=True)
         if stealth_tls:
             try:
                 from .stealth_transport import build_stealth_client
 
                 self._client = build_stealth_client(
-                    proxy=settings.upstream_proxy_url,
+                    proxy=proxy_url,
+                    profile=tls_profile,
                     timeout=settings.request_timeout,
                     trust_env=False,
                 )
@@ -122,14 +133,14 @@ class CodebuffClient:
                 self._client = httpx.AsyncClient(
                     timeout=httpx.Timeout(settings.request_timeout, read=None),
                     follow_redirects=True,
-                    proxy=settings.upstream_proxy_url,
+                    proxy=proxy_url,
                     trust_env=False,
                 )
         else:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(settings.request_timeout, read=None),
                 follow_redirects=True,
-                proxy=settings.upstream_proxy_url,
+                proxy=proxy_url,
                 trust_env=False,
             )
         self._agents_validated = False
@@ -149,9 +160,9 @@ class CodebuffClient:
         if require_auth and not self.settings.codebuff_token:
             raise CodebuffError("FREEBUFF_TOKEN or CODEBUFF_TOKEN is required", 500)
 
-        # Use settings.cli_user_agent (env-overridable) when caller doesn't pin
+        # Use identity user-agent if set, else settings.cli_user_agent
         if user_agent is None:
-            user_agent = self.settings.cli_user_agent
+            user_agent = self._identity.cli_user_agent if self._identity else self.settings.cli_user_agent
 
         headers = {
             "Accept": "*/*",
@@ -172,11 +183,14 @@ class CodebuffClient:
     def _accept_language(self) -> str:
         """Resolve Accept-Language header to match the configured locale fingerprint.
 
+        Per-account identity takes precedence; falls back to settings.locale.
         Upstream CLI sends Accept-Language consistent with the device locale.
         Mismatch (e.g. zh-CN locale but en-US Accept-Language) is a cheap
         fingerprinting signal. We map the configured locale to a realistic
         Accept-Language value.
         """
+        if self._identity is not None:
+            return self._identity.accept_language
         locale = (self.settings.locale or "en-US").lower()
         # Map common CLI locales to browser-style Accept-Language values
         mapping = {
@@ -845,10 +859,14 @@ class CodebuffAccountLease:
 class CodebuffAccountPool:
     def __init__(self, settings: Settings) -> None:
         tokens = settings.codebuff_tokens or (None,)
+        # Build per-account identity bundle for cross-account stealth isolation.
+        from .account_identity import AccountIdentityRegistry
+        self._identity_registry = AccountIdentityRegistry(tokens)
         self._accounts: list[CodebuffAccount] = []
-        for token in tokens:
+        for index, token in enumerate(tokens):
             account_settings = replace(settings, codebuff_token=token)
-            client = CodebuffClient(account_settings)
+            identity = self._identity_registry[index] if index < len(self._identity_registry) else None
+            client = CodebuffClient(account_settings, identity=identity)
             self._accounts.append(
                 CodebuffAccount(
                     client=client,
@@ -857,6 +875,10 @@ class CodebuffAccountPool:
             )
         self._next_index = 0
         self._condition = asyncio.Condition()
+
+    @property
+    def identity_registry(self) -> "AccountIdentityRegistry":
+        return self._identity_registry
 
     @property
     def account_count(self) -> int:
