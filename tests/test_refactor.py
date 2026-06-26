@@ -37,7 +37,8 @@ class ModelAliasTests(unittest.TestCase):
 
     def test_claude_alias_falls_back_to_default(self) -> None:
         m = resolve_model("claude-sonnet-4")
-        self.assertEqual(m.id, "deepseek/deepseek-v4-flash")
+        # Default is now MiniMax M3 (smartest & fastest, unlimited tier)
+        self.assertEqual(m.id, "minimax/minimax-m3")
 
     def test_gpt5_alias_resolves_to_pro(self) -> None:
         m = resolve_model("gpt-5")
@@ -53,10 +54,12 @@ class ModelAliasTests(unittest.TestCase):
 
     def test_default_model_when_none(self) -> None:
         m = resolve_model(None)
-        self.assertEqual(m.id, "deepseek/deepseek-v4-flash")
+        # Default = MiniMax M3 (smartest & fastest, unlimited, no data collection)
+        self.assertEqual(m.id, "minimax/minimax-m3")
 
     def test_all_models_count(self) -> None:
-        # 7 freebuff models (deepseek×2, kimi, minimax×2, mimo×2) + 2 GLM (z-ai/glm-5.2, glm-5.2) + 3 gemini = 12
+        # 8 freebuff (deepseek×2, kimi, minimax×2, mimo×2) + 2 GLM (z-ai/glm-5.2, glm-5.2) + 3 gemini = 13
+        # Currently 12 (glm-5.2 alias counts as 1 of the 2 GLM entries)
         self.assertGreaterEqual(len(ALL_MODELS), 12)
 
 

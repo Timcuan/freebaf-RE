@@ -47,32 +47,25 @@ def test_account_usage_purges_old_timestamps():
 
 
 def test_account_usage_idle_window():
-    # idle 0-7
-    acc = AccountUsage(account_index=0, idle_window=(0, 7))
-    # 03:00 local → in idle
-    # Use a timestamp where hour-of-day = 3
-    t = 3 * 3600  # 03:00 UTC, local_offset=0
-    assert acc.in_idle_window(t, local_offset_hours=0) is True
-    # 12:00 local → not in idle
+    acc = AccountUsage(account_index=0, idle_window=(0, 7), local_offset_hours=0)
+    t = 3 * 3600
+    assert acc.in_idle_window(t) is True
     t = 12 * 3600
-    assert acc.in_idle_window(t, local_offset_hours=0) is False
+    assert acc.in_idle_window(t) is False
 
 
 def test_account_usage_idle_window_wraps_midnight():
-    acc = AccountUsage(account_index=0, idle_window=(22, 7))
-    # 23:00 → in idle
-    assert acc.in_idle_window(23 * 3600, local_offset_hours=0) is True
-    # 03:00 → in idle
-    assert acc.in_idle_window(3 * 3600, local_offset_hours=0) is True
-    # 12:00 → not in idle
-    assert acc.in_idle_window(12 * 3600, local_offset_hours=0) is False
+    acc = AccountUsage(account_index=0, idle_window=(22, 7), local_offset_hours=0)
+    assert acc.in_idle_window(23 * 3600) is True
+    assert acc.in_idle_window(3 * 3600) is True
+    assert acc.in_idle_window(12 * 3600) is False
 
 
 def test_account_usage_idle_window_disabled():
     """None idle_window → never in idle (default — gateway always usable)."""
     acc = AccountUsage(account_index=0, idle_window=None)
     for hour in (0, 3, 6, 12, 18, 23):
-        assert acc.in_idle_window(hour * 3600, local_offset_hours=0) is False
+        assert acc.in_idle_window(hour * 3600) is False
 
 
 def test_account_usage_daily_cap_reset():
@@ -106,15 +99,13 @@ def test_rate_governor_pick_distributes_load():
     assert picked == 2
 
 
-def test_rate_governor_skips_idle_accounts():
-    # Idle window opt-in — default is None (disabled)
+def test_rate_governor_idle_window_uses_soft_fallback():
+    """Idle window blocks strict eligibility but still picks least-loaded."""
     gov = RateGovernor(account_count=3, idle_window_hours=(0, 7))
-    # Force all accounts into idle window (use a time at 03:00 local)
     t = 3 * 3600
     with patch("freebuff2api.rate_governor.time.time", return_value=t):
         picked = asyncio.run(gov.pick_account())
-    # All idle → return -1 (signal caller to fall back to default round-robin)
-    assert picked == -1
+    assert picked in (0, 1, 2)
 
 
 def test_rate_governor_skips_daily_cap():

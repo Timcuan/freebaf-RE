@@ -105,26 +105,28 @@ US proxy sources:
 
 ## 4. Available models
 
-The registry includes:
+Default model: **`minimax/minimax-m3`** (tier 0, unlimited, 1M context, no data collection).
 
-| Model ID | Vendor | Notes |
-|----------|--------|-------|
-| `deepseek/deepseek-v4-flash` | DeepSeek | Default, fastest |
-| `deepseek/deepseek-v4-pro` | DeepSeek | Smartest DeepSeek |
-| `moonshotai/kimi-k2.6` | Moonshot | Kimi K2.6 |
-| `minimax/minimax-m2.7` | MiniMax | |
-| `minimax/minimax-m3` | MiniMax | M3 |
-| `mimo/mimo-v2.5` | Xiaomi | MiMo 2.5 |
-| `mimo/mimo-v2.5-pro` | Xiaomi | MiMo 2.5 Pro |
-| `z-ai/glm-5.2` | Z.AI | GLM 5.2 — referral-gated weekly pool (5 sessions/referral/week, cap 10); bypassed 24/7 via Unleash session persistence |
-| `glm-5.2` | Z.AI | Short alias → `z-ai/glm-5.2` |
-| `google/gemini-2.5-flash-lite` | Google | File-picker agent |
-| `google/gemini-3.1-flash-lite-preview` | Google | File-picker-max agent |
-| `google/gemini-3.1-pro-preview` | Google | Thinker-with-files-gemini |
+Full tier list and metadata: `curl http://127.0.0.1:8000/v1/models -H "Authorization: Bearer $KEY"`.
+
+| Model ID | Tier | Notes |
+|----------|------|-------|
+| `minimax/minimax-m3` | 0 | **Default** — smartest + fastest, unlimited |
+| `mimo/mimo-v2.5` | 0 | Multimodal, unlimited |
+| `deepseek/deepseek-v4-flash` | 0 | Fast; upstream data-collection warning |
+| `minimax/minimax-m2.7` | 0 | Legacy fastest |
+| `google/gemini-3.1-flash-lite-preview` | 0 | File picker, 1M context |
+| `google/gemini-2.5-flash-lite` | 0 | File picker |
+| `deepseek/deepseek-v4-pro` | 1 | Premium daily (5 sessions/day) |
+| `moonshotai/kimi-k2.6` | 1 | Premium daily, 256k context |
+| `mimo/mimo-v2.5-pro` | 1 | Premium daily |
+| `z-ai/glm-5.2` | 2 | GLM weekly referral pool; 24/7 via Unleash |
+| `glm-5.2` | 2 | Short alias → `z-ai/glm-5.2` |
+| `google/gemini-3.1-pro-preview` | 3 | Thinker (spawned by tier-1 parents) |
 
 **Alias auto-resolve:**
-- `claude-sonnet-4`, `claude-3-5-sonnet`, `claude-3-7-sonnet` → default (DeepSeek V4 Flash)
-- `gpt-4o`, `gpt-4`, `gpt-5` → DeepSeek V4 Flash / Pro
+- `claude-sonnet-4`, `claude-3-5-sonnet`, `claude-3-7-sonnet` → default (`minimax/minimax-m3`)
+- `gpt-4o`, `gpt-4`, `gpt-5` → MiniMax M3 / DeepSeek Pro
 - `gemini-pro`, `gemini-3.1-pro` → `google/gemini-3.1-pro-preview`
 
 Clients (Cursor, Hermes, Claude Code, OpenAI SDK) are compatible with no extra configuration.
@@ -140,6 +142,12 @@ curl http://127.0.0.1:8000/healthz -H "Authorization: Bearer $FREEBUFF_API_KEY"
 # Egress diagnostic
 curl http://127.0.0.1:8000/api/health/egress -H "Authorization: Bearer $FREEBUFF_ADMIN_KEY"
 
+# Stealth + long-run diagnostic (governor, identity, cache bounds)
+curl http://127.0.0.1:8000/api/health/stealth -H "Authorization: Bearer $FREEBUFF_ADMIN_KEY"
+
+# Unleash / GLM pool + account health
+curl http://127.0.0.1:8000/api/health/glm52 -H "Authorization: Bearer $FREEBUFF_API_KEY"
+
 # Upstream connectivity
 curl http://127.0.0.1:8000/api/health/upstream -H "Authorization: Bearer $FREEBUFF_API_KEY"
 
@@ -147,18 +155,51 @@ curl http://127.0.0.1:8000/api/health/upstream -H "Authorization: Bearer $FREEBU
 curl http://127.0.0.1:8000/api/keep-warm
 ```
 
+See [`docs/stealth-longrun.md`](docs/stealth-longrun.md) for interpreting stealth metrics.
+
 ## 6. Verification checklist
 
-- [ ] `python -m pytest -q` → 150+ tests passing
+- [ ] `python -m pytest -q` → 415+ tests passing
 - [ ] `python main.py` starts, prints `deploy_mode=...`, egress check OK
 - [ ] `/healthz` returns 200
-- [ ] `/v1/models` lists models including `z-ai/glm-5.2`
+- [ ] `/v1/models` lists models including `minimax/minimax-m3` and `z-ai/glm-5.2`
 - [ ] `/api/health/egress` shows `direct.is_premium=true` (or `proxy.is_premium=true`)
+- [ ] `/api/health/stealth` shows `identity[].is_isolated=true` (multi-account + per-account proxy)
 - [ ] `/api/health/upstream` returns `status=ok`
-- [ ] `/v1/chat/completions` with `model=z-ai/glm-5.2` succeeds (non-stream + stream)
+- [ ] `/v1/chat/completions` with `model=minimax/minimax-m3` succeeds (non-stream + stream)
 - [ ] `/admin` login with `FREEBUFF_ADMIN_KEY`
 
-## 7. Ops
+## 7. Long-run ops (24/7 VPS)
+
+Multi-account stealth checklist:
+
+```dotenv
+FREEBUFF_TOKEN=tok1,tok2,tok3
+FREEBUFF_PER_ACCOUNT_PROXY=socks5://...,socks5://...,socks5://...
+FREEBUFF_LOCAL_OFFSET_HOURS=-5
+FREEBUFF_ACCOUNT_STAGGER_MINUTES=15
+FREEBUFF_SYSTEM_PROMPT_OVERRIDE=
+```
+
+Weekly monitoring (cron + jq):
+
+```bash
+# Stealth posture
+curl -s http://127.0.0.1:8000/api/health/stealth \
+  -H "Authorization: Bearer $FREEBUFF_ADMIN_KEY" | jq '.longrun, .rate_governor.accounts'
+
+# Keep-warm every 5 min (crontab)
+*/5 * * * * curl -sf http://127.0.0.1:8000/api/keep-warm >/dev/null
+```
+
+Watch for:
+- `ad_chain_cache_entries` — should stay ≤ 32 per account
+- `msgs_24h` per account — keep under soft cap (40) for stealth
+- `egress.ok` — false means fix proxy before accounts get banned
+
+Full guide: [`docs/stealth-longrun.md`](docs/stealth-longrun.md).
+
+## 8. Ops
 
 ```bash
 # Logs (systemd)

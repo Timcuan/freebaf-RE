@@ -1,0 +1,33 @@
+# Hermes Agent — freebaf-RE integration
+#
+# Add this to ~/.hermes/config.yaml to route Hermes through your freebaf-RE gateway.
+# Replace YOUR_FREEBUFF_API_KEY and the host if running on a VPS.
+
+providers:
+  - name: freebaf-re
+    base_url: http://localhost:8000/v1
+    api_key: YOUR_FREEBUFF_API_KEY
+    models:
+      - id: z-ai/glm-5.2
+        name: GLM 5.2 (Z.ai)
+        context_window: 128000
+      - id: deepseek/deepseek-v4-pro
+        name: DeepSeek V4 Pro
+        context_window: 128000
+      - id: moonshotai/kimi-k2.6
+        name: Kimi K2.6
+        context_window: 256000
+      - id: minimax/minimax-m2.7
+        name: MiniMax M2.7
+        context_window: 128000
+
+# Default model for Hermes agent loops
+model:
+  name: z-ai/glm-5.2
+  provider: freebaf-re
+
+# Example: coding agent system prompt (passes through untouched when
+# FREEBUFF_SYSTEM_PROMPT_OVERRIDE= in .env)
+system_prompt: |
+  You are a coding agent. Use tools to read files, run commands, and
+  edit code. Be concise and accurate.

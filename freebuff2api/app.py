@@ -62,11 +62,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     api_key_store.load_from_settings(settings.api_keys_json, settings.local_api_key)
     app.state.settings = settings
     app.state.accounts = accounts
+    app.state.account_pool = accounts  # alias for stealth/identity diagnostics
     app.state.codebuff = accounts.default_client
     app.state.sessions = accounts.default_sessions
     app.state.request_store = request_store
     app.state.api_key_store = api_key_store
     logger.info("configured freebuff accounts count=%s api_keys=%s", accounts.account_count, api_key_store.total_count)
+    isolated = accounts.identity_registry.isolated_count
+    if accounts.identity_registry.isolation_enabled and isolated < accounts.account_count:
+        logger.warning(
+            "identity isolation ON but only %s/%s accounts have distinct proxies — "
+            "cross-account IP correlation risk. Set FREEBUFF_PER_ACCOUNT_PROXY.",
+            isolated, accounts.account_count,
+        )
 
     # Stealth pre-flight: verify egress lands in a premium region AND is not
     # hard-blocked by upstream's VPN/proxy detection (commit #709).
@@ -115,10 +123,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     logger.warning("FREEBUFF_IDLE_WINDOW_HOURS invalid: %s — ignoring", idle_env)
 
             local_offset = int(os.getenv("FREEBUFF_LOCAL_OFFSET_HOURS", "0") or "0")
+            stagger = int(os.getenv("FREEBUFF_ACCOUNT_STAGGER_MINUTES", "15") or "15")
+            activity_phases = [
+                accounts.identity_registry[i].activity_phase_minutes
+                for i in range(accounts.account_count)
+            ]
             rate_governor = RateGovernor(
                 account_count=accounts.account_count,
                 idle_window_hours=idle_window,
                 local_offset_hours=local_offset,
+                activity_phases=activity_phases,
+                activity_stagger_minutes=stagger,
             )
             app.state.rate_governor = rate_governor
             logger.info(
@@ -187,6 +202,22 @@ def _sessions(request: Request) -> SessionManager:
 
 def _accounts(request: Request) -> CodebuffAccountPool:
     return request.app.state.accounts
+
+
+async def _governor_preferred_index(request: Request) -> int | None:
+    """Pick rate-governed account index for stealth routing."""
+    governor = getattr(request.app.state, "rate_governor", None)
+    if governor is None:
+        return None
+    await governor.jitter_delay()
+    try:
+        idx = await governor.pick_account()
+        if idx < 0:
+            await governor.backoff_when_exhausted()
+            idx = await governor.pick_account()
+        return idx if idx >= 0 else None
+    except Exception:
+        return None
 
 
 def _check_local_auth(request: Request, *, require_configured: bool = False):
@@ -314,7 +345,7 @@ async def health_egress(request: Request) -> dict[str, Any]:
 
 @app.get("/api/health/stealth")
 async def health_stealth(request: Request) -> dict[str, Any]:
-    """Full stealth diagnostic: egress + privacy signals + rate governor.
+    """Full stealth diagnostic: egress + privacy signals + rate governor + identity.
 
     Auth: requires admin key.
     """
@@ -329,6 +360,22 @@ async def health_stealth(request: Request) -> dict[str, Any]:
     if governor:
         governor_status = governor.status()
 
+    identity_status = None
+    pool = getattr(request.app.state, "account_pool", None)
+    if pool and hasattr(pool, "identity_registry"):
+        identity_status = pool.identity_registry.status()
+
+    longrun: dict[str, Any] = {}
+    if pool:
+        longrun["ad_chain_cache_entries"] = [
+            len(acc.sessions._ad_chain_cache)
+            for acc in pool._accounts
+        ]
+    unleash = getattr(request.app.state, "unleash_pool", None)
+    if unleash:
+        longrun["unleash_active_slots"] = sum(len(ms) for ms in unleash._slots)
+        longrun["unleash_inflight_tasks"] = len(unleash._inflight)
+
     return {
         "egress": egress,
         "stealth_tls": {
@@ -338,6 +385,8 @@ async def health_stealth(request: Request) -> dict[str, Any]:
             "enabled": _env_bool("FREEBUFF_STEALTH_TLS", default=True),
         },
         "rate_governor": governor_status,
+        "identity": identity_status,
+        "longrun": longrun,
         "fingerprint_store": str(_fingerprint_store_path()),
     }
 
@@ -466,22 +515,13 @@ async def chat_completions(request: Request) -> Any:
     )
     lease: CodebuffAccountLease | None = None
     try:
-        # Rate governor: jitter to break burst patterns + pick least-loaded account
-        governor = getattr(request.app.state, "rate_governor", None)
-        preferred_index: int | None = None
-        if governor is not None:
-            await governor.jitter_delay()
-            try:
-                preferred_index = await governor.pick_account()
-                if preferred_index < 0:
-                    preferred_index = None
-            except Exception:
-                preferred_index = None
+        preferred_index = await _governor_preferred_index(request)
         lease = await _accounts(request).acquire_session(
             model_config.session_id,
             messages=messages,
             preferred_index=preferred_index,
         )
+        governor = getattr(request.app.state, "rate_governor", None)
         if governor is not None and lease._account_index is not None:
             await governor.record_request(lease._account_index)
         client = lease.client
@@ -493,11 +533,13 @@ async def chat_completions(request: Request) -> Any:
         await client.validate_agents()
         run = await _start_freebuff_run_chain(client, model_config)
         trace_session_id = str(uuid.uuid4())
+        # Per-account client_id breaks cross-account correlation.
+        cid = client._identity.client_id if client._identity else settings.client_id
         payload = build_upstream_payload(
             {**body, "messages": messages},
             session=lease.session,
             run_id=run.payload_run_id,
-            client_id=settings.client_id,
+            client_id=cid,
             trace_session_id=trace_session_id,
             upstream_model_id=model_config.upstream_id,
             system_prompt=settings.system_prompt_override,
@@ -905,9 +947,14 @@ async def anthropic_messages(request: Request) -> Any:
     # Session & run preparation (shared with OpenAI path).
     lease: CodebuffAccountLease | None = None
     try:
+        preferred_index = await _governor_preferred_index(request)
         lease = await _accounts(request).acquire_session(
             model_config.session_id,
+            preferred_index=preferred_index,
         )
+        governor = getattr(request.app.state, "rate_governor", None)
+        if governor is not None and lease._account_index is not None:
+            await governor.record_request(lease._account_index)
         client = lease.client
         await client.request_ad_chain(
             session_instance_id=lease.session.instance_id,
@@ -916,11 +963,12 @@ async def anthropic_messages(request: Request) -> Any:
         await client.validate_agents()
         run = await _start_freebuff_run_chain(client, model_config)
         trace_session_id = str(uuid.uuid4())
+        cid = client._identity.client_id if client._identity else settings.client_id
         payload = build_anthropic_upstream_payload(
             body,
             session=lease.session,
             run_id=run.payload_run_id,
-            client_id=settings.client_id,
+            client_id=cid,
             trace_session_id=trace_session_id,
             upstream_model_id=model_config.upstream_id,
             system_prompt=settings.system_prompt_override,

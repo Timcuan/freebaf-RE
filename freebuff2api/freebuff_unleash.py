@@ -87,15 +87,12 @@ FREEBUFF_SESSION_LENGTH_MS = 3_600_000  # 1 hour
 SESSION_REFRESH_THRESHOLD_MS = 300_000  # refresh when <5min remaining
 PRE_EMPTIVE_REFRESH_MS = 5_000_000  # refresh at 55min mark (race-safe)
 WARMUP_TICK_SEC = 30  # check every 30s
+WARMUP_ACCOUNT_STAGGER_SEC = 3  # delay between accounts in one tick (anti correlation)
 
-# All Freebuff models for multi-model warmup
-ALL_FREEBUFF_MODELS = (
-    "z-ai/glm-5.2",            # GLM 5.2 — referral weekly pool (bypass via multi-account)
-    "minimax/minimax-m2.7",    # Fastest, always available (non-premium, no gate)
-    "moonshotai/kimi-k2.6",    # Premium daily pool
-    "deepseek/deepseek-v4-pro",   # Premium daily pool
-    "deepseek/deepseek-v4-flash", # Non-premium, always available
-)
+# Warmup model list — derived from models.py (tier 0-2, newest per provider first).
+from .models import unleash_warmup_models  # noqa: E402
+
+ALL_FREEBUFF_MODELS = unleash_warmup_models()
 
 # Deployment hours retained for diagnostics only — GLM 5.2's real gate is the
 # weekly referral pool, not deployment hours (verified from upstream source).
@@ -280,7 +277,7 @@ class UnleashPool:
                 async with self._lock:
                     self._slots[i][model] = slot
                 self._next_account[model] = (i + 1) % n
-                self.health.mark_success(pool)
+                self.health.mark_success(i, pool)
                 logger.info(
                     "unleash session created account=%s model=%s instance=%s remaining_ms=%s",
                     i, model, session_lease.session.instance_id,
@@ -289,7 +286,7 @@ class UnleashPool:
                 await session_lease.aclose()
                 return i, session_lease.session
             except RateLimitedError as e:
-                self.health.mark_exhausted(e.pool or pool, reset_at=e.reset_at)
+                self.health.mark_exhausted(i, e.pool or pool, reset_at=e.reset_at)
                 logger.warning(
                     "unleash create rate_limited account=%s model=%s pool=%s reset_at=%s — trying next",
                     i, model, e.pool, e.reset_at,
@@ -340,7 +337,7 @@ class UnleashPool:
                 slot.last_used_at = time.time()
                 slot.use_count = 0
                 slot.ad_chain_done = True
-                self.health.mark_success(pool)
+                self.health.mark_success(account_index, pool)
                 await new_lease.aclose()
                 logger.info(
                     "unleash session refreshed account=%s model=%s instance=%s",
@@ -348,7 +345,7 @@ class UnleashPool:
                 )
                 return True
             except RateLimitedError as e:
-                self.health.mark_exhausted(e.pool or pool, reset_at=e.reset_at)
+                self.health.mark_exhausted(account_index, e.pool or pool, reset_at=e.reset_at)
                 # Session was deleted upstream but new one failed — clear slot
                 # so warmup recreates it later. Without this, the stale session
                 # would be served to requests and fail with 404.
@@ -391,7 +388,13 @@ class UnleashPool:
         for i in range(n):
             h = self.health[i]
             if h.banned or h.geo_blocked:
+                # Clear cached slots — banned account sessions are dead upstream.
+                if self._slots[i]:
+                    async with self._lock:
+                        self._slots[i].clear()
                 continue
+            if i > 0:
+                await asyncio.sleep(WARMUP_ACCOUNT_STAGGER_SEC)
             for model in self.models:
                 pool = pool_for_model(model)
                 # Skip gated models on exhausted accounts
@@ -435,14 +438,14 @@ class UnleashPool:
             )
             async with self._lock:
                 self._slots[account_index][model] = slot
-            self.health.mark_success(pool)
+                self.health.mark_success(account_index, pool)
             await session_lease.aclose()
             logger.info(
                 "unleash warmup created account=%s model=%s instance=%s",
                 account_index, model, session_lease.session.instance_id,
             )
         except RateLimitedError as e:
-            self.health.mark_exhausted(e.pool or pool, reset_at=e.reset_at)
+            self.health.mark_exhausted(account_index, e.pool or pool, reset_at=e.reset_at)
         except CodebuffError as e:
             # Mark account banned/geo-blocked so warmup stops retrying it.
             if e.status_code == 403:
