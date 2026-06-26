@@ -131,15 +131,23 @@ class AccountHealth:
 
 
 def pool_for_model(model: str) -> str:
-    """Map a model id to its upstream session pool."""
+    """Map a model id to its upstream session pool.
+
+    Delegates to FreebuffModel.pool when the model is recognized. Falls back
+    to heuristic matching for aliases / unknown models.
+    """
+    from .models import resolve_model
+    try:
+        m = resolve_model(model)
+        return m.pool
+    except ValueError:
+        pass
+    # Heuristic fallback for unknown model ids
     if "glm" in model.lower():
         return POOL_GLM_WEEKLY
-    # Premium daily pool: DeepSeek Pro, Kimi, MiMo Pro
-    # (DeepSeek Flash, MiMo, MiniMax M2.7/M3 are non-premium, unlimited daily)
     model_lower = model.lower()
     if any(p in model_lower for p in ("deepseek-v4-pro", "kimi", "mimo-v2.5-pro")):
         return POOL_PREMIUM_DAILY
-    # Non-premium models — no upstream quota gate (always available, unlimited)
     return ""
 
 

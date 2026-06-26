@@ -290,13 +290,51 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Models
 
-Run `curl http://localhost:8000/v1/models -H "Authorization: Bearer $KEY"` for the full list.
+Run `curl http://localhost:8000/v1/models -H "Authorization: Bearer $KEY"` for the full list with spec metadata (tier, premium, multimodal, context_window, data_collection).
 
-Highlights:
-- `z-ai/glm-5.2` — Z.AI GLM 5.2 (smartest, referral-gated weekly pool upstream; cached 24/7 via Unleash session persistence)
-- `minimax/minimax-m2.7` — MiniMax (fastest, always available)
-- `moonshotai/kimi-k2.6` — Kimi
-- `deepseek/deepseek-v4-pro`, `deepseek/deepseek-v4-flash` — DeepSeek
+### Tier 0 — Unlimited (no quota gate, always available)
+
+| Model | Display | Tagline | Multimodal | Context | Data collection |
+|---|---|---|---|---|---|
+| `minimax/minimax-m3` | MiniMax M3 | Smartest & Fastest | yes | 1M | no (Fireworks) |
+| `mimo/mimo-v2.5` | MiMo 2.5 | Multimodal | yes | 128k | no |
+| `deepseek/deepseek-v4-flash` | DeepSeek V4 Flash | Smart & Fast | no | 128k | **yes** |
+| `minimax/minimax-m2.7` | MiniMax M2.7 | Fastest (legacy) | no | 128k | no |
+| `google/gemini-3.1-flash-lite-preview` | Gemini 3.1 Flash Lite | File picker | yes | 1M | no |
+| `google/gemini-2.5-flash-lite` | Gemini 2.5 Flash Lite | File picker | yes | 1M | no |
+
+**Default model: `minimax/minimax-m3`** (smartest + fastest, unlimited, no data collection, 1M context).
+
+### Tier 1 — Premium daily (5 sessions/day, reset midnight Pacific)
+
+| Model | Display | Tagline | Multimodal | Context | Thinker |
+|---|---|---|---|---|---|
+| `deepseek/deepseek-v4-pro` | DeepSeek V4 Pro | Smartest | no | 1M | yes |
+| `moonshotai/kimi-k2.6` | Kimi K2.6 | Balanced | yes | 256k | yes |
+| `mimo/mimo-v2.5-pro` | MiMo 2.5 Pro | Smartest & Slow | yes | 128k | yes |
+
+### Tier 2 — GLM weekly referral (5 sessions/referral/week, cap 10 = 50/week)
+
+| Model | Display | Tagline | Multimodal | Context |
+|---|---|---|---|---|
+| `z-ai/glm-5.2` | GLM 5.2 | Unlock by referring friends | no | 128k |
+
+### Tier 3 — Gemini thinker (spawned by Tier 1 parents + MiniMax M3)
+
+| Model | Display | Parent models |
+|---|---|---|
+| `google/gemini-3.1-pro-preview` | Gemini 3.1 Pro (Thinker) | Kimi, DeepSeek Pro, MiMo Pro, MiniMax M3 |
+
+### Provider priority (newest first)
+
+| Provider | Latest model | Tier |
+|---|---|---|
+| minimax | `minimax/minimax-m3` | 0 (unlimited) |
+| deepseek | `deepseek/deepseek-v4-flash` | 0 (unlimited) |
+| mimo | `mimo/mimo-v2.5` | 0 (unlimited) |
+| moonshot | `moonshotai/kimi-k2.6` | 1 (premium) |
+| zai | `z-ai/glm-5.2` | 2 (referral) |
+| google | `google/gemini-3.1-pro-preview` | 3 (thinker) |
 
 ## Freebuff Unleash
 

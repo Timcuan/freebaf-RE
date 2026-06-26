@@ -52,7 +52,7 @@ class ModelAliasTests(unittest.TestCase):
 
     def test_default_model_when_none_requested(self) -> None:
         m = resolve_model(None)
-        self.assertEqual(m.id, "deepseek/deepseek-v4-flash")
+        self.assertEqual(m.id, "minimax/minimax-m3")
 
     def test_unsupported_model_raises(self) -> None:
         with self.assertRaises(ValueError):
