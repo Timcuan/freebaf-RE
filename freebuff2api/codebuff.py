@@ -408,13 +408,13 @@ class CodebuffClient:
         body = {
             "provider": provider,
             "messages": _ad_messages(messages),
-            "sessionId": self.settings.session_id,
+            "sessionId": self._identity.session_id if self._identity else self.settings.session_id,
             "device": {
-                "os": self.settings.os_name,
-                "timezone": self.settings.timezone,
-                "locale": self.settings.locale,
+                "os": self._identity.device_os if self._identity else self.settings.os_name,
+                "timezone": self._identity.timezone if self._identity else self.settings.timezone,
+                "locale": self._identity.locale if self._identity else self.settings.locale,
             },
-            "userAgent": HAR_BROWSER_USER_AGENT,
+            "userAgent": self._identity.browser_ua if self._identity else HAR_BROWSER_USER_AGENT,
         }
         if surface:
             body["surface"] = surface

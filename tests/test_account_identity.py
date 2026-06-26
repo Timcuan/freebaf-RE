@@ -148,6 +148,59 @@ class IdentityRegistryTests(unittest.TestCase):
         self.assertEqual(reg[0].cli_user_agent, "codebuff/1.0.682")
         self.assertEqual(reg[1].cli_user_agent, "codebuff/1.0.680")
 
+    def test_client_id_unique_per_account(self) -> None:
+        """Per-account client_id breaks cross-account correlation."""
+        tokens = ("tok-A", "tok-B", "tok-C")
+        reg = AccountIdentityRegistry(tokens)
+        cids = {reg[i].client_id for i in range(3)}
+        self.assertEqual(len(cids), 3)  # all distinct
+        for cid in cids:
+            self.assertEqual(len(cid), 11)  # matches upstream hex[:11] format
+
+    def test_session_id_unique_and_uuid_format(self) -> None:
+        tokens = ("tok-A", "tok-B")
+        reg = AccountIdentityRegistry(tokens)
+        sids = {reg[i].session_id for i in range(2)}
+        self.assertEqual(len(sids), 2)
+        for sid in sids:
+            # UUID format: 8-4-4-4-12
+            self.assertEqual(len(sid), 36)
+            self.assertEqual(sid.count("-"), 4)
+
+    def test_identity_stable_across_registries(self) -> None:
+        """Same token → same client_id/session_id across restarts."""
+        tokens = ("tok-A", "tok-B")
+        reg1 = AccountIdentityRegistry(tokens)
+        reg2 = AccountIdentityRegistry(tokens)
+        for i in range(2):
+            self.assertEqual(reg1[i].client_id, reg2[i].client_id)
+            self.assertEqual(reg1[i].session_id, reg2[i].session_id)
+
+    def test_browser_ua_varies_per_account(self) -> None:
+        tokens = ("tok-A", "tok-B", "tok-C")
+        reg = AccountIdentityRegistry(tokens)
+        uas = {reg[i].browser_ua for i in range(3)}
+        self.assertEqual(len(uas), 3)  # all distinct
+
+    def test_device_os_varies_per_account(self) -> None:
+        """device.os in ad-request body varies per account (correlation break)."""
+        os.environ["FREEBUFF_IDENTITY_ISOLATION"] = "true"
+        os.environ["FREEBUFF_PER_ACCOUNT_LOCALE"] = "zh-CN,en-US,de-DE"
+        tokens = ("tok-A", "tok-B", "tok-C")
+        reg = AccountIdentityRegistry(tokens)
+        # zh-CN → windows, en-US → macos, de-DE → linux
+        self.assertEqual(reg[0].device_os, "windows")
+        self.assertEqual(reg[1].device_os, "macos")
+        self.assertEqual(reg[2].device_os, "linux")
+
+    def test_legacy_mode_still_has_unique_client_session_ids(self) -> None:
+        """Even in legacy mode, client_id/session_id must be per-account."""
+        os.environ["FREEBUFF_IDENTITY_ISOLATION"] = "false"
+        tokens = ("tok-A", "tok-B")
+        reg = AccountIdentityRegistry(tokens)
+        self.assertNotEqual(reg[0].client_id, reg[1].client_id)
+        self.assertNotEqual(reg[0].session_id, reg[1].session_id)
+
     def test_empty_tokens(self) -> None:
         reg = AccountIdentityRegistry(())
         self.assertEqual(len(reg), 0)

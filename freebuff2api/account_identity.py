@@ -135,6 +135,11 @@ class AccountIdentity:
     timezone: str
     accept_language: str         # derived from locale
     activity_phase_minutes: int  # 0-59 stagger offset
+    # Per-account correlation-breaking fields (derived from account_id).
+    client_id: str = ""          # 11-char hex, like upstream CLI default
+    session_id: str = ""         # UUID per account
+    device_os: str = "windows"   # device.os in ad-request body
+    browser_ua: str = ""         # ad-provider User-Agent (Chrome/Firefox/Safari)
 
     @property
     def is_isolated(self) -> bool:
@@ -153,6 +158,10 @@ class AccountIdentity:
             "timezone": self.timezone,
             "accept_language": self.accept_language,
             "activity_phase_minutes": self.activity_phase_minutes,
+            "client_id": self.client_id,
+            "session_id": self.session_id,
+            "device_os": self.device_os,
+            "browser_ua": self.browser_ua,
             "is_isolated": self.is_isolated,
         }
 
@@ -175,6 +184,62 @@ def _pick(items: tuple[str, ...], account_index: int, account_id: str) -> str:
     if not items:
         return ""
     return items[account_index % len(items)]
+
+
+# Browser UA variations for ad-provider requests. All real, current.
+_BROWSER_UAS: tuple[str, ...] = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/137.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/137.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/137.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) "
+    "Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    "Version/17.3 Safari/605.1.15",
+)
+
+_DEVICE_OS_BY_LOCALE: dict[str, str] = {
+    "zh-CN": "windows",
+    "en-US": "macos",
+    "en-GB": "macos",
+    "en-CA": "windows",
+    "ja-JP": "macos",
+    "de-DE": "linux",
+    "fr-FR": "macos",
+}
+
+
+def _derive_client_id(account_id: str) -> str:
+    """Derive a stable 11-char hex client_id from account_id.
+
+    Mirrors upstream CLI default (uuid4().hex[:11]) but deterministic per
+    account so the same account always uses the same client_id across
+    restarts (avoiding correlation via changing client_id).
+    """
+    digest = hashlib.sha256(f"client:{account_id}".encode("utf-8")).hexdigest()
+    return digest[:11]
+
+
+def _derive_session_id(account_id: str) -> str:
+    """Derive a stable UUID-format session_id from account_id.
+
+    Stable per account (avoids correlation via changing session_id across
+    requests). Format matches upstream (uuid4 string).
+    """
+    import uuid
+
+    digest = hashlib.sha256(f"session:{account_id}".encode("utf-8")).digest()
+    return str(uuid.UUID(bytes=digest[:16]))
+
+
+def _browser_ua_for_account(account_index: int) -> str:
+    return _BROWSER_UAS[account_index % len(_BROWSER_UAS)]
 
 
 class AccountIdentityRegistry:
@@ -210,6 +275,14 @@ class AccountIdentityRegistry:
 
     def _build(self, index: int, token: str) -> AccountIdentity:
         account_id = _account_id_from_token(token)
+        # Per-account correlation-breaking fields (always derived, even in
+        # legacy mode — these are stable per account and never shared).
+        client_id = _derive_client_id(account_id)
+        session_id = _derive_session_id(account_id)
+        device_os = _DEVICE_OS_BY_LOCALE.get(
+            _pick(self._locales, index, account_id), "windows"
+        ) if self._isolation_enabled else "windows"
+        browser_ua = _browser_ua_for_account(index) if self._isolation_enabled else _BROWSER_UAS[0]
 
         if not self._isolation_enabled:
             # Legacy mode: all accounts share global settings.
@@ -225,6 +298,10 @@ class AccountIdentityRegistry:
                 timezone="America/New_York",
                 accept_language="en-US,en;q=0.9",
                 activity_phase_minutes=0,
+                client_id=client_id,
+                session_id=session_id,
+                device_os="windows",
+                browser_ua=_BROWSER_UAS[0],
             )
 
         # Isolated mode — per-account distinct values.
@@ -251,6 +328,10 @@ class AccountIdentityRegistry:
             timezone=timezone,
             accept_language=_locale_to_accept_language(locale),
             activity_phase_minutes=phase,
+            client_id=client_id,
+            session_id=session_id,
+            device_os=_DEVICE_OS_BY_LOCALE.get(locale, "windows"),
+            browser_ua=browser_ua,
         )
 
     def __len__(self) -> int:

@@ -507,11 +507,13 @@ async def chat_completions(request: Request) -> Any:
         await client.validate_agents()
         run = await _start_freebuff_run_chain(client, model_config)
         trace_session_id = str(uuid.uuid4())
+        # Per-account client_id breaks cross-account correlation.
+        cid = client._identity.client_id if client._identity else settings.client_id
         payload = build_upstream_payload(
             {**body, "messages": messages},
             session=lease.session,
             run_id=run.payload_run_id,
-            client_id=settings.client_id,
+            client_id=cid,
             trace_session_id=trace_session_id,
             upstream_model_id=model_config.upstream_id,
             system_prompt=settings.system_prompt_override,
@@ -930,11 +932,12 @@ async def anthropic_messages(request: Request) -> Any:
         await client.validate_agents()
         run = await _start_freebuff_run_chain(client, model_config)
         trace_session_id = str(uuid.uuid4())
+        cid = client._identity.client_id if client._identity else settings.client_id
         payload = build_anthropic_upstream_payload(
             body,
             session=lease.session,
             run_id=run.payload_run_id,
-            client_id=settings.client_id,
+            client_id=cid,
             trace_session_id=trace_session_id,
             upstream_model_id=model_config.upstream_id,
             system_prompt=settings.system_prompt_override,
