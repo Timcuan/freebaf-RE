@@ -68,6 +68,13 @@ def test_account_usage_idle_window_wraps_midnight():
     assert acc.in_idle_window(12 * 3600, local_offset_hours=0) is False
 
 
+def test_account_usage_idle_window_disabled():
+    """None idle_window → never in idle (default — gateway always usable)."""
+    acc = AccountUsage(account_index=0, idle_window=None)
+    for hour in (0, 3, 6, 12, 18, 23):
+        assert acc.in_idle_window(hour * 3600, local_offset_hours=0) is False
+
+
 def test_account_usage_daily_cap_reset():
     acc = AccountUsage(account_index=0)
     now = 1000.0
@@ -100,7 +107,8 @@ def test_rate_governor_pick_distributes_load():
 
 
 def test_rate_governor_skips_idle_accounts():
-    gov = RateGovernor(account_count=3)
+    # Idle window opt-in — default is None (disabled)
+    gov = RateGovernor(account_count=3, idle_window_hours=(0, 7))
     # Force all accounts into idle window (use a time at 03:00 local)
     t = 3 * 3600
     with patch("freebuff2api.rate_governor.time.time", return_value=t):

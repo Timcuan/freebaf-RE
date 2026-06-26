@@ -483,13 +483,106 @@ class StealthTransportLoopTests(unittest.TestCase):
         assert "get_running_loop" in source
 
 
+class IdleWindowDisabledTests(unittest.TestCase):
+    """BUG #36: idle window must be disabled by default (gateway always usable)."""
+
+    def test_default_idle_window_is_none(self) -> None:
+        from freebuff2api.rate_governor import DEFAULT_IDLE_WINDOW_HOURS
+
+        assert DEFAULT_IDLE_WINDOW_HOURS is None
+
+    def test_rate_governor_no_idle_by_default(self) -> None:
+        """Without idle_window_hours, pick_account should never return -1 due to idle."""
+        from freebuff2api.rate_governor import RateGovernor
+
+        gov = RateGovernor(account_count=2)
+        # Any time of day — should pick a valid account (not -1)
+        for hour in range(24):
+            t = hour * 3600
+            import asyncio
+
+            with patch("freebuff2api.rate_governor.time.time", return_value=t):
+                picked = asyncio.run(gov.pick_account())
+            assert 0 <= picked < 2, f"hour {hour}: got {picked}"
+
+    def test_idle_window_env_disabled_by_default(self) -> None:
+        """FREEBUFF_IDLE_WINDOW_HOURS unset → no idle window."""
+        # Just verify the .env.example documents it as disabled by default
+        from pathlib import Path
+
+        env_example = Path(__file__).resolve().parents[1] / ".env.example"
+        content = env_example.read_text()
+        assert "FREEBUFF_IDLE_WINDOW_HOURS=" in content
+        assert "disabled" in content.lower() or "DISABLED" in content
+
+
+class SystemPromptPassthroughTests(unittest.TestCase):
+    """BUG #37: system_prompt_override should be honored in all normalize calls."""
+
+    def test_chat_completions_uses_settings_override(self) -> None:
+        """app.py chat_completions should pass settings.system_prompt_override to normalize."""
+        import inspect
+
+        from freebuff2api.app import chat_completions
+
+        source = inspect.getsource(chat_completions)
+        assert "system_prompt=settings.system_prompt_override" in source
+
+    def test_normalize_empty_string_no_injection(self) -> None:
+        """Empty string system_prompt → pure passthrough, no Buffy prefix."""
+        from freebuff2api.openai_compat import normalize_chat_messages
+
+        msgs = [{"role": "user", "content": "hi"}]
+        result = normalize_chat_messages(msgs, system_prompt="")
+        # No system message should be injected
+        assert all(m.get("role") != "system" for m in result)
+
+    def test_normalize_none_uses_buffy_default(self) -> None:
+        """None system_prompt → default Buffy neutralizer (upstream requirement)."""
+        from freebuff2api.openai_compat import normalize_chat_messages
+
+        msgs = [{"role": "user", "content": "hi"}]
+        result = normalize_chat_messages(msgs, system_prompt=None)
+        # Buffy prefix injected as system message
+        assert any(m.get("role") == "system" and "Buffy" in m.get("content", "") for m in result)
+
+
+class ErrorResponseFormatTests(unittest.TestCase):
+    """BUG #39: non-CodebuffError should return JSON 500, not raise unhandled."""
+
+    def test_error_response_returns_json_for_generic_exception(self) -> None:
+        from freebuff2api.app import _error_response
+
+        resp = _error_response(RuntimeError("boom"))
+        assert resp.status_code == 500
+        # Body should be JSON with error structure
+        import json
+
+        body = json.loads(resp.body)
+        assert "error" in body
+        assert body["error"]["type"] == "internal_error"
+
+    def test_error_response_preserves_codebuff_status(self) -> None:
+        from freebuff2api.app import _error_response
+        from freebuff2api.codebuff import CodebuffError
+
+        err = CodebuffError("banned", 403)
+        resp = _error_response(err)
+        assert resp.status_code == 403
+        import json
+
+        body = json.loads(resp.body)
+        assert body["error"]["code"] == "codebuff_error"
+
+
 class RateGovernorFallbackSignalTests(unittest.TestCase):
     """BUG #35: pick_account should return -1 when no account eligible (signal caller to fall back)."""
 
     def test_all_idle_returns_negative_one(self) -> None:
         from freebuff2api.rate_governor import RateGovernor
 
-        gov = RateGovernor(account_count=2)
+        # Idle window opt-in — default is None (disabled)
+        gov = RateGovernor(account_count=2, idle_window_hours=(0, 7))
         # Force idle window
         with patch("freebuff2api.rate_governor.time.time", return_value=3 * 3600):
             picked = asyncio.run(gov.pick_account())
