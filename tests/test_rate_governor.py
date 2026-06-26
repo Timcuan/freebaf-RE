@@ -68,6 +68,13 @@ def test_account_usage_idle_window_wraps_midnight():
     assert acc.in_idle_window(12 * 3600, local_offset_hours=0) is False
 
 
+def test_account_usage_idle_window_disabled():
+    """None idle_window → never in idle (default — gateway always usable)."""
+    acc = AccountUsage(account_index=0, idle_window=None)
+    for hour in (0, 3, 6, 12, 18, 23):
+        assert acc.in_idle_window(hour * 3600, local_offset_hours=0) is False
+
+
 def test_account_usage_daily_cap_reset():
     acc = AccountUsage(account_index=0)
     now = 1000.0
@@ -100,13 +107,14 @@ def test_rate_governor_pick_distributes_load():
 
 
 def test_rate_governor_skips_idle_accounts():
-    gov = RateGovernor(account_count=3)
+    # Idle window opt-in — default is None (disabled)
+    gov = RateGovernor(account_count=3, idle_window_hours=(0, 7))
     # Force all accounts into idle window (use a time at 03:00 local)
     t = 3 * 3600
     with patch("freebuff2api.rate_governor.time.time", return_value=t):
         picked = asyncio.run(gov.pick_account())
-    # All idle → fallback to least-recently-used (which is index 0 by default)
-    assert picked == 0
+    # All idle → return -1 (signal caller to fall back to default round-robin)
+    assert picked == -1
 
 
 def test_rate_governor_skips_daily_cap():
@@ -171,8 +179,8 @@ def test_rate_governor_all_exhausted_falls_back_to_lru():
     gov._accounts[0].last_used_at = now - 100
     gov._accounts[1].last_used_at = now - 200
     picked = asyncio.run(gov.pick_account())
-    # Account 1 is least recently used
-    assert picked == 1
+    # All exhausted → return -1 (signal caller to fall back to default round-robin)
+    assert picked == -1
 
 
 def test_rate_governor_prefer_healthy_over_soft_cap_approaching():

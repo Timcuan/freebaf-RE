@@ -171,6 +171,10 @@ async def poll_login(
 
 
 def verify_token_sync(token: str) -> tuple[bool, str]:
+    """Synchronous token verification (legacy, no proxy support).
+
+    Use verify_token() (async) for proxy-aware verification.
+    """
     req = urllib.request.Request(
         VERIFY_URL,
         headers={
@@ -192,7 +196,50 @@ def verify_token_sync(token: str) -> tuple[bool, str]:
 
 
 async def verify_token(token: str) -> tuple[bool, str]:
-    return await asyncio.to_thread(verify_token_sync, token)
+    """Async, proxy-aware token verification.
+
+    Routes through the same stealth transport + egress proxy as
+    CodebuffClient so verification doesn't leak the real IP or bypass
+    proxy config (which would fail if egress is proxy-gated).
+    """
+    import os
+
+    import httpx
+
+    proxy_url = os.getenv("FREEBUFF_EGRESS_PROXY_URL") or os.getenv("FREEBUFF_PROXY_URL")
+    stealth_tls = os.getenv("FREEBUFF_STEALTH_TLS", "true").lower() in {"1", "true", "yes", "on"}
+    client_kwargs: dict[str, Any] = {
+        "timeout": 15.0,
+        "follow_redirects": True,
+        "trust_env": False,
+    }
+    if stealth_tls:
+        try:
+            from .stealth_transport import build_stealth_client
+
+            client = build_stealth_client(proxy=proxy_url, timeout=15.0, trust_env=False)
+        except Exception:
+            client = httpx.AsyncClient(proxy=proxy_url, **client_kwargs)
+    else:
+        client = httpx.AsyncClient(proxy=proxy_url, **client_kwargs)
+    try:
+        resp = await client.get(
+            VERIFY_URL,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "*/*",
+                "User-Agent": HTTP_USER_AGENT,
+            },
+        )
+        if resp.status_code in (401, 403):
+            return False, f"HTTP {resp.status_code} (token rejected): {resp.text[:200]}"
+        if 200 <= resp.status_code < 300:
+            return True, f"HTTP {resp.status_code}"
+        return True, f"HTTP {resp.status_code} (auth ok, endpoint returned: {resp.text[:200]})"
+    except httpx.RequestError as e:
+        return False, f"network error: {e}"
+    finally:
+        await client.aclose()
 
 
 def user_to_stored_dict(user: LoginUser, *, fingerprint_id: str, fingerprint_hash: str, source: str, added_at: float | None = None) -> dict[str, Any]:

@@ -107,7 +107,11 @@ class CurlCffiTransport(httpx.AsyncBaseTransport):
 
         import asyncio
 
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop — shouldn't happen in async context, but fallback.
+            loop = asyncio.get_event_loop()
         cffi_resp = await loop.run_in_executor(None, _send)
 
         # Convert curl_cffi response back to httpx.Response

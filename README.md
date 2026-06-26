@@ -205,6 +205,44 @@ curl http://localhost:8000/v1/chat/completions \
 
 Compatible with any OpenAI SDK client — set `base_url=http://localhost:8000/v1`.
 
+### Client integration examples
+
+**Python (OpenAI SDK):**
+```python
+from openai import OpenAI
+client = OpenAI(api_key="YOUR_FREEBUFF_API_KEY", base_url="http://localhost:8000/v1")
+resp = client.chat.completions.create(
+    model="z-ai/glm-5.2",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(resp.choices[0].message.content)
+```
+
+**Node.js (openai):**
+```js
+import OpenAI from "openai";
+const client = new OpenAI({ apiKey: "YOUR_FREEBUFF_API_KEY", baseURL: "http://localhost:8000/v1" });
+const resp = await client.chat.completions.create({
+  model: "z-ai/glm-5.2",
+  messages: [{ role: "user", content: "Hello" }],
+});
+console.log(resp.choices[0].message.content);
+```
+
+**curl:**
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_FREEBUFF_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"z-ai/glm-5.2","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+**Cursor IDE:** Settings → Models → OpenAI API Key = `YOUR_FREEBUFF_API_KEY`, Base URL = `http://localhost:8000/v1`. Model name = `z-ai/glm-5.2`.
+
+**Claude Code / Anthropic SDK:** Use `/v1/messages` with `base_url=http://localhost:8000`. The gateway translates Anthropic ↔ OpenAI formats bidirectionally.
+
+**Agent integration (passthrough):** Set `FREEBUFF_SYSTEM_PROMPT_OVERRIDE=` (empty) in `.env` to disable the default Buffy-neutralizer prefix. Your agent's system prompt passes through to the model untouched.
+
 ## Models
 
 Run `curl http://localhost:8000/v1/models -H "Authorization: Bearer $KEY"` for the full list.

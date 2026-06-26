@@ -4,6 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import datetime
 import logging
+import os
 import time
 from typing import Any, AsyncIterator
 import uuid
@@ -102,13 +103,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             from .rate_governor import RateGovernor
 
-            rate_governor = RateGovernor(account_count=accounts.account_count)
+            # Idle window opt-in via env: "0,7" or "" to disable.
+            idle_window = None
+            idle_env = os.getenv("FREEBUFF_IDLE_WINDOW_HOURS", "").strip()
+            if idle_env:
+                try:
+                    parts = idle_env.split(",")
+                    if len(parts) == 2:
+                        idle_window = (int(parts[0]), int(parts[1]))
+                except ValueError:
+                    logger.warning("FREEBUFF_IDLE_WINDOW_HOURS invalid: %s — ignoring", idle_env)
+
+            local_offset = int(os.getenv("FREEBUFF_LOCAL_OFFSET_HOURS", "0") or "0")
+            rate_governor = RateGovernor(
+                account_count=accounts.account_count,
+                idle_window_hours=idle_window,
+                local_offset_hours=local_offset,
+            )
             app.state.rate_governor = rate_governor
             logger.info(
-                "rate governor active: accounts=%s daily_cap=%s soft_msg_cap=%s",
+                "rate governor active: accounts=%s daily_cap=%s soft_msg_cap=%s idle_window=%s",
                 accounts.account_count,
                 rate_governor.daily_msg_cap,
                 rate_governor.soft_msg_cap,
+                idle_window,
             )
         except Exception as e:
             logger.warning("rate governor init failed: %s", e)
@@ -135,6 +153,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="freebuff2api", version="0.1.0", lifespan=lifespan)
 app.include_router(admin_router)
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Add security headers to all responses.
+
+    - X-Content-Type-Options: nosniff — prevent MIME sniffing
+    - X-Frame-Options: DENY — prevent admin panel clickjacking
+    - Referrer-Policy: no-referrer — don't leak URLs to upstream
+    - HSTS — only on HTTPS (avoid breaking HTTP local dev)
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 
 def _settings(request: Request) -> Settings:
@@ -209,7 +245,18 @@ def _error_response(error: Exception) -> JSONResponse:
                 }
             },
         )
-    raise error
+    # Non-CodebuffError — return 500 with OpenAI-compatible JSON error body.
+    logger.exception("unhandled error in chat completion: %s", error)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "message": f"internal gateway error: {error}",
+                "type": "internal_error",
+                "code": "internal_error",
+            }
+        },
+    )
 
 
 def _record_request(
@@ -372,7 +419,12 @@ async def get_model(request: Request, model_id: str) -> dict[str, Any]:
 async def chat_completions(request: Request) -> Any:
     api_key = _check_local_auth(request, require_configured=True)
     _check_freebuff_token(request)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="request body must be valid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be a JSON object")
     settings = _settings(request)
     try:
         model_config = resolve_model(body.get("model"))
@@ -407,7 +459,11 @@ async def chat_completions(request: Request) -> Any:
             render_debug(body, settings.log_body_chars),
         )
 
-    messages = normalize_chat_messages(body.get("messages"))
+    settings = _settings(request)
+    messages = normalize_chat_messages(
+        body.get("messages"),
+        system_prompt=settings.system_prompt_override,
+    )
     lease: CodebuffAccountLease | None = None
     try:
         # Rate governor: jitter to break burst patterns + pick least-loaded account
@@ -764,7 +820,24 @@ async def _finalize_run_with_client(
 async def anthropic_messages(request: Request) -> Any:
     api_key = _check_anthropic_auth(request, require_configured=True)
     _check_freebuff_token(request)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            status_code=400,
+            content=anthropic_error_payload(
+                "request body must be valid JSON",
+                error_type="invalid_request_error",
+            ),
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=400,
+            content=anthropic_error_payload(
+                "request body must be a JSON object",
+                error_type="invalid_request_error",
+            ),
+        )
     settings = _settings(request)
 
     # Validate required fields — return Anthropic-compatible errors.

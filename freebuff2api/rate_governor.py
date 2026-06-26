@@ -47,7 +47,11 @@ DEFAULT_SOFT_MSG_CAP = 40            # < 50 (24-7-usage flag)
 DEFAULT_SOFT_HOURS_CAP = 16          # < 20 (24-7-usage flag)
 DEFAULT_MIN_JITTER_MS = 50
 DEFAULT_MAX_JITTER_MS = 350
-DEFAULT_IDLE_WINDOW_HOURS: tuple[int, int] = (0, 7)  # 00:00-07:00 local
+# Idle window disabled by default — opt-in via FREEBUFF_IDLE_WINDOW_HOURS.
+# Hardcoding 0-7 would block the gateway 7h/day for users in timezones where
+# that window lands during their workday. The governor's primary defense is
+# load distribution + soft caps, not forced idle.
+DEFAULT_IDLE_WINDOW_HOURS: tuple[int, int] | None = None
 
 
 @dataclass
@@ -74,6 +78,8 @@ class AccountUsage:
             self.daily_reset_at = now + 86400.0
 
     def in_idle_window(self, now: float, local_offset_hours: int = 0) -> bool:
+        if self.idle_window is None:
+            return False
         local_hour = int(((now / 3600.0) + local_offset_hours) % 24)
         start, end = self.idle_window
         if start <= end:
@@ -175,11 +181,10 @@ class RateGovernor:
             ]
             if not eligible:
                 logger.warning(
-                    "rate_governor: all %s accounts exhausted/idle — falling back to round-robin",
+                    "rate_governor: all %s accounts exhausted/idle — caller should fall back",
                     len(self._accounts),
                 )
-                # Fallback: least-recently-used, ignore caps
-                return min(range(len(self._accounts)), key=lambda i: self._accounts[i].last_used_at)
+                return -1  # signal caller to use default round-robin
 
             # Prefer accounts NOT approaching the soft cap (distribute load)
             healthy = [(i, acc) for i, acc in eligible if not self._approaching_soft_cap(acc, now)]

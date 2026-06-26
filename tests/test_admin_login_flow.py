@@ -118,7 +118,7 @@ class LoginFlowAdminTests(unittest.TestCase):
         with patch.dict("os.environ", {"FREEBUFF_ADMIN_KEY": "admin-secret"}, clear=True):
             with patch("freebuff2api.admin.start_login", new_callable=AsyncMock, return_value=start_result):
                 with patch("freebuff2api.admin.poll_login", new_callable=AsyncMock, side_effect=fast_poll):
-                    with patch("freebuff2api.admin.verify_token_sync", return_value=(True, "HTTP 200")):
+                    with patch("freebuff2api.admin.verify_token_async", new=AsyncMock(return_value=(True, "HTTP 200"))):
                         with patch("freebuff2api.admin.write_env_values") as write_env:
                             with patch("freebuff2api.admin.CodebuffAccountPool") as pool_cls:
                                 pool = pool_cls.return_value
@@ -149,7 +149,7 @@ class LoginFlowAdminTests(unittest.TestCase):
         with patch.dict("os.environ", {"FREEBUFF_ADMIN_KEY": "admin-secret"}, clear=True):
             with patch("freebuff2api.admin.start_login", new_callable=AsyncMock, return_value=start_result):
                 with patch("freebuff2api.admin.poll_login", new_callable=AsyncMock, side_effect=fast_poll):
-                    with patch("freebuff2api.admin.verify_token_sync", return_value=(False, "HTTP 401 rejected")):
+                    with patch("freebuff2api.admin.verify_token_async", new=AsyncMock(return_value=(False, "HTTP 401 rejected"))):
                         with TestClient(app) as client:
                             _admin_login(client)
                             start = client.post("/admin/api/login-flow/start?mode=freebuff").json()["data"]
@@ -193,7 +193,7 @@ class LoginFlowAdminTests(unittest.TestCase):
         ):
             with patch("freebuff2api.admin.start_login", new_callable=AsyncMock, return_value=start_result):
                 with patch("freebuff2api.admin.poll_login", new_callable=AsyncMock, side_effect=fast_poll):
-                    with patch("freebuff2api.admin.verify_token_sync", return_value=(True, "HTTP 200")):
+                    with patch("freebuff2api.admin.verify_token_async", new=AsyncMock(return_value=(True, "HTTP 200"))):
                         with patch("freebuff2api.admin.write_env_values"):
                             with patch("freebuff2api.admin.CodebuffAccountPool") as pool_cls:
                                 pool = pool_cls.return_value

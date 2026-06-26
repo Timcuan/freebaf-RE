@@ -312,5 +312,302 @@ class FingerprintReuseTests(unittest.TestCase):
         assert "save_fingerprint_store" not in reuse_only
 
 
+class Round4BugfixTests(unittest.TestCase):
+    """Round 4: resource leaks, banned/geo handling, security headers, input validation."""
+
+    def test_unleash_stop_cancels_inflight(self) -> None:
+        """BUG #18: stop() should cancel in-flight tasks, not just warmup_task."""
+        import inspect
+
+        from freebuff2api.freebuff_unleash import UnleashPool
+
+        source = inspect.getsource(UnleashPool.stop)
+        assert "_inflight" in source
+        assert "cancel" in source
+
+    def test_create_one_handles_banned_status_code(self) -> None:
+        """BUG #20: _create_one should mark banned via status_code, not string match."""
+        import inspect
+
+        from freebuff2api.freebuff_unleash import UnleashPool
+
+        source = inspect.getsource(UnleashPool._create_one)
+        assert "status_code == 403" in source
+        assert "status_code == 451" in source
+        assert "mark_banned" in source
+        assert "mark_geo_blocked" in source
+
+    def test_create_session_handles_banned_status_code(self) -> None:
+        """BUG #20: _create_session_any_account should use status_code."""
+        import inspect
+
+        from freebuff2api.freebuff_unleash import UnleashPool
+
+        source = inspect.getsource(UnleashPool._create_session_any_account)
+        assert "status_code == 403" in source
+        assert "status_code == 451" in source
+
+    def test_security_headers_middleware_exists(self) -> None:
+        """BUG #21: security headers middleware should be registered."""
+        import inspect
+
+        from freebuff2api.app import app, security_headers_middleware
+
+        # Verify middleware function exists
+        assert security_headers_middleware is not None
+        source = inspect.getsource(security_headers_middleware)
+        assert "X-Content-Type-Options" in source
+        assert "X-Frame-Options" in source
+        assert "Referrer-Policy" in source
+        assert "Strict-Transport-Security" in source
+
+    def test_admin_cookie_has_secure_flag(self) -> None:
+        """BUG #22: admin cookie should set secure flag on HTTPS."""
+        import inspect
+
+        from freebuff2api.admin import login
+
+        source = inspect.getsource(login)
+        assert "secure=" in source
+        assert "is_https" in source or "x-forwarded-proto" in source
+
+    def test_chat_completions_validates_json_body(self) -> None:
+        """BUG #23: chat completions should return 400 on malformed JSON."""
+        import inspect
+
+        from freebuff2api.app import chat_completions
+
+        source = inspect.getsource(chat_completions)
+        assert "valid JSON" in source
+        assert "isinstance(body, dict)" in source
+
+    def test_anthropic_messages_validates_json_body(self) -> None:
+        """BUG #23: anthropic messages should return 400 on malformed JSON."""
+        import inspect
+
+        from freebuff2api.app import anthropic_messages
+
+        source = inspect.getsource(anthropic_messages)
+        assert "valid JSON" in source
+
+    def test_reserve_account_has_timeout(self) -> None:
+        """BUG #9: _reserve_account should have timeout, not hang forever."""
+        import inspect
+
+        from freebuff2api.codebuff import CodebuffAccountPool
+
+        source = inspect.getsource(CodebuffAccountPool._reserve_account)
+        assert "timeout" in source
+        assert "wait_for" in source
+        assert "timed out" in source or "TimeoutError" in source
+
+
+class SecurityHeadersIntegrationTests(unittest.TestCase):
+    """Integration: verify security headers appear in responses."""
+
+    def test_security_headers_present(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from freebuff2api.app import app
+
+        with TestClient(app) as client:
+            response = client.get("/healthz")
+        assert response.headers.get("X-Content-Type-Options") == "nosniff"
+        assert response.headers.get("X-Frame-Options") == "DENY"
+        assert response.headers.get("Referrer-Policy") == "no-referrer"
+
+
+class ChatCompletionsValidationTests(unittest.TestCase):
+    """Integration: verify malformed JSON returns 400."""
+
+    def test_malformed_json_returns_400(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from freebuff2api.app import app
+
+        with patch.dict("os.environ", {"FREEBUFF_API_KEY": "k", "FREEBUFF_TOKEN": "tok"}, clear=True):
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/chat/completions",
+                    data="not valid json{{{",
+                    headers={"Authorization": "Bearer k"},
+                )
+        assert response.status_code == 400
+
+
+class SessionRefreshStaleSlotTests(unittest.TestCase):
+    """BUG #29: refresh_session should clear stale slot if delete succeeds but new session fails."""
+
+    def test_refresh_clears_slot_on_rate_limited(self) -> None:
+        import inspect
+
+        from freebuff2api.freebuff_unleash import UnleashPool
+
+        source = inspect.getsource(UnleashPool.refresh_session)
+        assert "slot cleared" in source or "_slots[account_index].pop" in source
+
+    def test_refresh_clears_slot_on_exception(self) -> None:
+        """Both except blocks should pop the stale slot."""
+        import inspect
+
+        from freebuff2api.freebuff_unleash import UnleashPool
+
+        source = inspect.getsource(UnleashPool.refresh_session)
+        # Both RateLimitedError and generic Exception paths should clear slot
+        assert source.count("_slots[account_index].pop") >= 2
+
+
+class ProxyAwareTokenVerifyTests(unittest.TestCase):
+    """BUG #26: verify_token should be proxy-aware (use httpx, not urllib)."""
+
+    def test_verify_token_uses_httpx_not_urllib(self) -> None:
+        import inspect
+
+        from freebuff2api.login_flow import verify_token
+
+        source = inspect.getsource(verify_token)
+        assert "httpx" in source
+        assert "proxy" in source.lower()
+        assert "stealth_transport" in source or "build_stealth_client" in source
+
+
+class StealthTransportLoopTests(unittest.TestCase):
+    """BUG #32: handle_async_request should use get_running_loop, not deprecated get_event_loop."""
+
+    def test_uses_get_running_loop(self) -> None:
+        import inspect
+
+        from freebuff2api.stealth_transport import CurlCffiTransport
+
+        source = inspect.getsource(CurlCffiTransport.handle_async_request)
+        assert "get_running_loop" in source
+
+
+class IdleWindowDisabledTests(unittest.TestCase):
+    """BUG #36: idle window must be disabled by default (gateway always usable)."""
+
+    def test_default_idle_window_is_none(self) -> None:
+        from freebuff2api.rate_governor import DEFAULT_IDLE_WINDOW_HOURS
+
+        assert DEFAULT_IDLE_WINDOW_HOURS is None
+
+    def test_rate_governor_no_idle_by_default(self) -> None:
+        """Without idle_window_hours, pick_account should never return -1 due to idle."""
+        from freebuff2api.rate_governor import RateGovernor
+
+        gov = RateGovernor(account_count=2)
+        # Any time of day — should pick a valid account (not -1)
+        for hour in range(24):
+            t = hour * 3600
+            import asyncio
+
+            with patch("freebuff2api.rate_governor.time.time", return_value=t):
+                picked = asyncio.run(gov.pick_account())
+            assert 0 <= picked < 2, f"hour {hour}: got {picked}"
+
+    def test_idle_window_env_disabled_by_default(self) -> None:
+        """FREEBUFF_IDLE_WINDOW_HOURS unset → no idle window."""
+        # Just verify the .env.example documents it as disabled by default
+        from pathlib import Path
+
+        env_example = Path(__file__).resolve().parents[1] / ".env.example"
+        content = env_example.read_text()
+        assert "FREEBUFF_IDLE_WINDOW_HOURS=" in content
+        assert "disabled" in content.lower() or "DISABLED" in content
+
+
+class SystemPromptPassthroughTests(unittest.TestCase):
+    """BUG #37: system_prompt_override should be honored in all normalize calls."""
+
+    def test_chat_completions_uses_settings_override(self) -> None:
+        """app.py chat_completions should pass settings.system_prompt_override to normalize."""
+        import inspect
+
+        from freebuff2api.app import chat_completions
+
+        source = inspect.getsource(chat_completions)
+        assert "system_prompt=settings.system_prompt_override" in source
+
+    def test_normalize_empty_string_no_injection(self) -> None:
+        """Empty string system_prompt → pure passthrough, no Buffy prefix."""
+        from freebuff2api.openai_compat import normalize_chat_messages
+
+        msgs = [{"role": "user", "content": "hi"}]
+        result = normalize_chat_messages(msgs, system_prompt="")
+        # No system message should be injected
+        assert all(m.get("role") != "system" for m in result)
+
+    def test_normalize_none_uses_buffy_default(self) -> None:
+        """None system_prompt → default Buffy neutralizer (upstream requirement)."""
+        from freebuff2api.openai_compat import normalize_chat_messages
+
+        msgs = [{"role": "user", "content": "hi"}]
+        result = normalize_chat_messages(msgs, system_prompt=None)
+        # Buffy prefix injected as system message
+        assert any(m.get("role") == "system" and "Buffy" in m.get("content", "") for m in result)
+
+
+class ErrorResponseFormatTests(unittest.TestCase):
+    """BUG #39: non-CodebuffError should return JSON 500, not raise unhandled."""
+
+    def test_error_response_returns_json_for_generic_exception(self) -> None:
+        from freebuff2api.app import _error_response
+
+        resp = _error_response(RuntimeError("boom"))
+        assert resp.status_code == 500
+        # Body should be JSON with error structure
+        import json
+
+        body = json.loads(resp.body)
+        assert "error" in body
+        assert body["error"]["type"] == "internal_error"
+
+    def test_error_response_preserves_codebuff_status(self) -> None:
+        from freebuff2api.app import _error_response
+        from freebuff2api.codebuff import CodebuffError
+
+        err = CodebuffError("banned", 403)
+        resp = _error_response(err)
+        assert resp.status_code == 403
+        import json
+
+        body = json.loads(resp.body)
+        assert body["error"]["code"] == "codebuff_error"
+
+
+class RateGovernorFallbackSignalTests(unittest.TestCase):
+    """BUG #35: pick_account should return -1 when no account eligible (signal caller to fall back)."""
+
+    def test_all_idle_returns_negative_one(self) -> None:
+        from freebuff2api.rate_governor import RateGovernor
+
+        # Idle window opt-in — default is None (disabled)
+        gov = RateGovernor(account_count=2, idle_window_hours=(0, 7))
+        # Force idle window
+        with patch("freebuff2api.rate_governor.time.time", return_value=3 * 3600):
+            picked = asyncio.run(gov.pick_account())
+        assert picked == -1
+
+    def test_all_at_cap_returns_negative_one(self) -> None:
+        from freebuff2api.rate_governor import RateGovernor
+
+        gov = RateGovernor(account_count=2, daily_msg_cap=1)
+        now = time.time()
+        for i in range(2):
+            gov._accounts[i].daily_msg_count = 1
+            gov._accounts[i].daily_reset_at = now + 99999
+        picked = asyncio.run(gov.pick_account())
+        assert picked == -1
+
+    def test_app_py_handles_negative_one(self) -> None:
+        """app.py should convert -1 to None (use default round-robin)."""
+        import inspect
+
+        from freebuff2api.app import chat_completions
+
+        source = inspect.getsource(chat_completions)
+        assert "preferred_index < 0" in source
+
+
 if __name__ == "__main__":
     unittest.main()
