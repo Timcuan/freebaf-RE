@@ -39,6 +39,18 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
                   upstream_model_id="z-ai/glm-5.2"),
 )
 
+# Extra aliases for common client variations (z.ai vs zai, glm5.2, etc.)
+_EXTRA_ALIASES = {
+    "zai/glm-5.2": "z-ai/glm-5.2",
+    "zai-glm-5.2": "z-ai/glm-5.2",
+    "zaiglm-5.2": "z-ai/glm-5.2",
+    "glm5.2": "glm-5.2",
+    "z-ai-glm-5.2": "z-ai/glm-5.2",
+    "zai/glm-5.1": "z-ai/glm-5.2",
+    "z-ai/glm-5.1": "z-ai/glm-5.2",
+    "glm-5.1": "glm-5.2",
+}
+
 DEFAULT_MODEL = FREEBUFF_MODELS[0]
 CONTEXT_PRUNER_AGENT_ID = "context-pruner"
 GEMINI_THINKER_AGENT_ID = "thinker-with-files-gemini"
@@ -72,10 +84,6 @@ GEMINI_FREE_MODELS: tuple[FreebuffModel, ...] = (
 
 ALL_MODELS = FREEBUFF_MODELS + GEMINI_FREE_MODELS
 
-def all_models_with_cf(cf_enabled: bool = False) -> tuple[FreebuffModel, ...]:
-    """Return all models (Freebuff-only, no external providers)."""
-    return ALL_MODELS
-
 # Alias map: normalized (lowercase, no slash) -> canonical model id
 _MODEL_ALIASES: dict[str, str] = {}
 for _m in ALL_MODELS:
@@ -94,6 +102,9 @@ _MODEL_ALIASES["gpt-5"] = "deepseek/deepseek-v4-pro"
 _MODEL_ALIASES["gpt-5.2"] = "deepseek/deepseek-v4-pro"
 _MODEL_ALIASES["gemini-3.1-pro"] = "google/gemini-3.1-pro-preview"
 _MODEL_ALIASES["gemini-pro"] = "google/gemini-3.1-pro-preview"
+# Extra aliases (z.ai variations, glm 5.1 -> 5.2 fallback, etc.)
+for _k, _v in _EXTRA_ALIASES.items():
+    _MODEL_ALIASES[_k.lower()] = _v
 del _m
 
 
