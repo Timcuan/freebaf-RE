@@ -56,7 +56,10 @@ including the anti-abuse commits:
 | Plus-alias email | `user+abc123@` → +10 score | login flow uses real OAuth accounts (Google/GitHub), no aliases |
 | Email-digits / duck.com / handle-userN | +5/+10/+5 score | real OAuth accounts only |
 | **Cross-account correlation** | bot-sweep clusters accounts by shared IP, TLS, UA, timing | `account_identity.py` per-account proxy/TLS/UA/locale/timezone/phase |
-| **Activity phase** | concurrent activity across accounts = cluster signal | per-account stagger offset (FREEBUFF_ACCOUNT_STAGGER_MINUTES) |
+| **client_id / session_id sharing** | same OAuth device IDs across accounts | per-account `client_id` (11-char hex) + UUID `session_id` |
+| **Device / browser UA sharing** | identical ad-request device block | per-account `device_os` + distinct Chrome/Firefox/Safari `browser_ua` |
+| **Activity phase** | concurrent activity across accounts = cluster signal | per-account minute offset (`FREEBUFF_ACCOUNT_STAGGER_MINUTES`) wired to rate governor |
+| **Long-run memory leak** | ad-chain cache grows on 55min refresh loop | `_prune_ad_chain_cache()` — TTL 30min, max 32 entries per account |
 
 ### Per-account identity isolation (multi-account stealth)
 
@@ -73,6 +76,10 @@ clusters accounts by these signals.
 - **locale** — `FREEBUFF_PER_ACCOUNT_LOCALE` (distinct Accept-Language)
 - **timezone** — `FREEBUFF_PER_ACCOUNT_TIMEZONE` (distinct device timezone)
 - **activity phase** — `FREEBUFF_ACCOUNT_STAGGER_MINUTES` (distributes activity across the hour)
+- **client_id** — 11-char hex per account (upstream CLI format)
+- **session_id** — UUID per account (breaks OAuth session correlation)
+- **device_os** — `windows` / `macos` / `linux` in ad-request body
+- **browser_ua** — distinct Chrome/Firefox/Safari UA for ad providers
 
 Status visible at `/api/health/stealth` (admin-auth required):
 
@@ -121,17 +128,21 @@ US/CA exit IPs — those are not flagged.
 
 ### Rate governor
 
-`rate_governor.py` tracks per-account 24h rolling usage and:
+`rate_governor.py` tracks per-account 24h rolling usage and applies to both
+`/v1/chat/completions` and `/v1/messages`:
 
-1. Skips accounts in their idle window (default 00:00–07:00 local)
-2. Skips accounts at daily cap (default 180 < 200 burst flag)
-3. Prefers accounts NOT approaching soft cap (40 msgs / 16 hours)
-4. Picks the account with lowest `msgs_24h` to distribute load evenly
-5. Falls back to least-recently-used when all exhausted (degraded service
-   over total outage)
-6. Injects 50–350ms jitter before each request to break burst patterns
+1. **Hard daily cap** (default 180 msgs) — resets at **local midnight**, not `now+86400` drift
+2. **Soft cap** (40 msgs / 16 distinct hours per 24h) — stays below bot-sweep HIGH tier (50/20)
+3. **Idle window** — **disabled by default**; opt-in via `FREEBUFF_IDLE_WINDOW_HOURS=0,8`
+4. **Activity phase** — per-account minute offset from identity registry; spreads load across the hour
+5. **Account pick** — lowest `msgs_24h` among eligible accounts
+6. **Soft fallback** — when all accounts are idle/phase-blocked, still picks least-loaded (avoids blind round-robin bypass)
+7. **Hard exhaustion** — returns `-1` only when ALL accounts hit daily cap; app backs off 2–8s and retries
+8. **Jitter** — 50–350ms delay before each routed request
 
-Status visible at `/api/health/stealth` (admin auth).
+Local timezone: `FREEBUFF_LOCAL_OFFSET_HOURS` (e.g. `-5` for US Eastern).
+
+Status visible at `/api/health/stealth` (admin auth). See `docs/stealth-longrun.md` for full long-run guide.
 
 ### Bot-sweep evasion
 
@@ -153,7 +164,10 @@ curl http://localhost:8000/api/health/stealth -H "Authorization: Bearer $ADMIN_K
 ```
 
 The response includes egress validation, TLS stealth status, rate governor
-per-account usage, and the fingerprint store path.
+per-account usage, identity bundles, **longrun metrics** (`ad_chain_cache_entries`,
+`unleash_active_slots`, `unleash_inflight_tasks`), and the fingerprint store path.
+
+Full stealth + 24/7 ops guide: [`docs/stealth-longrun.md`](docs/stealth-longrun.md).
 
 ## Multi-account login
 
@@ -201,10 +215,19 @@ Required:
 Recommended:
 - `FREEBUFF_ADMIN_KEY` — admin panel login key (default `sk-admin`, change in production)
 
-Optional:
-- `FREEBUFF_EGRESS_PROXY_URL` — SOCKS5/HTTP proxy URL for upstream egress (e.g. `socks5://us-proxy:1080`)
+Optional (stealth / multi-account):
+- `FREEBUFF_EGRESS_PROXY_URL` — SOCKS5/HTTP proxy for upstream egress
+- `FREEBUFF_PER_ACCOUNT_PROXY` — comma-separated residential proxies (one per account; **strongly recommended**)
+- `FREEBUFF_PER_ACCOUNT_TLS` — comma-separated curl_cffi profiles per account
+- `FREEBUFF_IDLE_WINDOW_HOURS` — opt-in sleep window, e.g. `0,8` (default: disabled)
+- `FREEBUFF_LOCAL_OFFSET_HOURS` — timezone offset for idle window + daily reset (default `0`)
+- `FREEBUFF_ACCOUNT_STAGGER_MINUTES` — activity phase spread (default `15`)
+- `FREEBUFF_IDENTITY_ISOLATION` — per-account identity bundles (default `true`)
+- `FREEBUFF_STEALTH_TLS` — curl_cffi TLS mimicry (default `true`)
+- `FREEBUFF_SYSTEM_PROMPT_OVERRIDE` — empty string = agent passthrough (Cursor/Hermes/Claude Code)
+
+Optional (general):
 - `FREEBUFF_EGRESS_REGION_REQUIRED` — expected egress country code (e.g. `US`)
-- `FREEBUFF_SYSTEM_PROMPT_OVERRIDE` — inject a custom system prompt
 - `FREEBUFF_DEBUG` — enable debug logging
 - `FREEBUFF_LOG_LEVEL` — `INFO` (default), `DEBUG`, `WARNING`, `ERROR`
 
@@ -372,9 +395,16 @@ quota gate, unlimited sessions/day on any account.
 `rate_limited`, the account is marked exhausted for that pool and skipped
 until `resetAt`; the next account with quota is picked automatically.
 
-Background warmup runs every 30s and pre-emptively refreshes sessions
-approaching the 55-min mark (only on accounts with remaining quota for the
-model's pool).
+Background warmup runs every 30s with **3s stagger between accounts** and
+pre-emptively refreshes sessions approaching the 55-min mark (only on accounts
+with remaining quota for the model's pool). Warmup targets all tier 0–2 models
+via `unleash_warmup_models()` (MiniMax M3, MiMo, DeepSeek, premium daily, GLM).
+
+**Long-run safety:**
+- Ad-chain cache pruned (TTL 30min, max 32 entries per account)
+- Banned/geo-blocked accounts: cached slots cleared, warmup skipped
+- In-flight warmup tasks deduplicated with done-callback cleanup
+- `AccountHealthRegistry.mark_success(i, pool)` tracks quota per account
 
 Monitor status:
 
@@ -385,11 +415,20 @@ curl http://localhost:8000/api/health/glm52 -H "Authorization: Bearer $KEY"
 The response includes `account_health` with per-account quota snapshots for
 both the premium daily pool and the GLM weekly referral pool.
 
+## Documentation
+
+| Doc | Contents |
+|-----|----------|
+| [`DEPLOY.md`](DEPLOY.md) | Local, VPS, Docker, Caddy, egress proxy |
+| [`docs/stealth-longrun.md`](docs/stealth-longrun.md) | Stealth layers, rate governor, 24/7 ops, monitoring |
+| [`docs/cursor-setup.md`](docs/cursor-setup.md) | Cursor IDE integration |
+| [`docs/claude-code-setup.md`](docs/claude-code-setup.md) | Claude Code / Anthropic SDK |
+
 ## Development
 
 ```bash
 pip install -e .
-pytest tests/ -q
+pytest tests/ -q   # 415+ tests
 ```
 
 ## License

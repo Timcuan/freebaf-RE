@@ -576,17 +576,15 @@ class ErrorResponseFormatTests(unittest.TestCase):
 
 
 class RateGovernorFallbackSignalTests(unittest.TestCase):
-    """BUG #35: pick_account should return -1 when no account eligible (signal caller to fall back)."""
+    """pick_account returns -1 only at hard daily cap; soft fallback otherwise."""
 
-    def test_all_idle_returns_negative_one(self) -> None:
+    def test_all_idle_uses_soft_fallback(self) -> None:
         from freebuff2api.rate_governor import RateGovernor
 
-        # Idle window opt-in — default is None (disabled)
         gov = RateGovernor(account_count=2, idle_window_hours=(0, 7))
-        # Force idle window
         with patch("freebuff2api.rate_governor.time.time", return_value=3 * 3600):
             picked = asyncio.run(gov.pick_account())
-        assert picked == -1
+        assert picked in (0, 1)
 
     def test_all_at_cap_returns_negative_one(self) -> None:
         from freebuff2api.rate_governor import RateGovernor
@@ -600,13 +598,13 @@ class RateGovernorFallbackSignalTests(unittest.TestCase):
         assert picked == -1
 
     def test_app_py_handles_negative_one(self) -> None:
-        """app.py should convert -1 to None (use default round-robin)."""
+        """app.py should backoff and retry when governor returns -1."""
         import inspect
 
-        from freebuff2api.app import chat_completions
+        from freebuff2api.app import _governor_preferred_index
 
-        source = inspect.getsource(chat_completions)
-        assert "preferred_index < 0" in source
+        source = inspect.getsource(_governor_preferred_index)
+        assert "backoff_when_exhausted" in source
 
 
 if __name__ == "__main__":

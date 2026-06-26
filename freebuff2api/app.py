@@ -123,10 +123,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     logger.warning("FREEBUFF_IDLE_WINDOW_HOURS invalid: %s — ignoring", idle_env)
 
             local_offset = int(os.getenv("FREEBUFF_LOCAL_OFFSET_HOURS", "0") or "0")
+            stagger = int(os.getenv("FREEBUFF_ACCOUNT_STAGGER_MINUTES", "15") or "15")
+            activity_phases = [
+                accounts.identity_registry[i].activity_phase_minutes
+                for i in range(accounts.account_count)
+            ]
             rate_governor = RateGovernor(
                 account_count=accounts.account_count,
                 idle_window_hours=idle_window,
                 local_offset_hours=local_offset,
+                activity_phases=activity_phases,
+                activity_stagger_minutes=stagger,
             )
             app.state.rate_governor = rate_governor
             logger.info(
@@ -195,6 +202,22 @@ def _sessions(request: Request) -> SessionManager:
 
 def _accounts(request: Request) -> CodebuffAccountPool:
     return request.app.state.accounts
+
+
+async def _governor_preferred_index(request: Request) -> int | None:
+    """Pick rate-governed account index for stealth routing."""
+    governor = getattr(request.app.state, "rate_governor", None)
+    if governor is None:
+        return None
+    await governor.jitter_delay()
+    try:
+        idx = await governor.pick_account()
+        if idx < 0:
+            await governor.backoff_when_exhausted()
+            idx = await governor.pick_account()
+        return idx if idx >= 0 else None
+    except Exception:
+        return None
 
 
 def _check_local_auth(request: Request, *, require_configured: bool = False):
@@ -342,6 +365,17 @@ async def health_stealth(request: Request) -> dict[str, Any]:
     if pool and hasattr(pool, "identity_registry"):
         identity_status = pool.identity_registry.status()
 
+    longrun: dict[str, Any] = {}
+    if pool:
+        longrun["ad_chain_cache_entries"] = [
+            len(acc.sessions._ad_chain_cache)
+            for acc in pool._accounts
+        ]
+    unleash = getattr(request.app.state, "unleash_pool", None)
+    if unleash:
+        longrun["unleash_active_slots"] = sum(len(ms) for ms in unleash._slots)
+        longrun["unleash_inflight_tasks"] = len(unleash._inflight)
+
     return {
         "egress": egress,
         "stealth_tls": {
@@ -352,6 +386,7 @@ async def health_stealth(request: Request) -> dict[str, Any]:
         },
         "rate_governor": governor_status,
         "identity": identity_status,
+        "longrun": longrun,
         "fingerprint_store": str(_fingerprint_store_path()),
     }
 
@@ -480,22 +515,13 @@ async def chat_completions(request: Request) -> Any:
     )
     lease: CodebuffAccountLease | None = None
     try:
-        # Rate governor: jitter to break burst patterns + pick least-loaded account
-        governor = getattr(request.app.state, "rate_governor", None)
-        preferred_index: int | None = None
-        if governor is not None:
-            await governor.jitter_delay()
-            try:
-                preferred_index = await governor.pick_account()
-                if preferred_index < 0:
-                    preferred_index = None
-            except Exception:
-                preferred_index = None
+        preferred_index = await _governor_preferred_index(request)
         lease = await _accounts(request).acquire_session(
             model_config.session_id,
             messages=messages,
             preferred_index=preferred_index,
         )
+        governor = getattr(request.app.state, "rate_governor", None)
         if governor is not None and lease._account_index is not None:
             await governor.record_request(lease._account_index)
         client = lease.client
@@ -921,9 +947,14 @@ async def anthropic_messages(request: Request) -> Any:
     # Session & run preparation (shared with OpenAI path).
     lease: CodebuffAccountLease | None = None
     try:
+        preferred_index = await _governor_preferred_index(request)
         lease = await _accounts(request).acquire_session(
             model_config.session_id,
+            preferred_index=preferred_index,
         )
+        governor = getattr(request.app.state, "rate_governor", None)
+        if governor is not None and lease._account_index is not None:
+            await governor.record_request(lease._account_index)
         client = lease.client
         await client.request_ad_chain(
             session_instance_id=lease.session.instance_id,

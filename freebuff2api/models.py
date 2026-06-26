@@ -413,17 +413,34 @@ def latest_model_per_provider() -> dict[str, FreebuffModel]:
     by_provider: dict[str, FreebuffModel] = {}
     for model in ALL_MODELS:
         provider = model.owned_by
-        # Prefer lower tier (unlimited) for "latest", then higher context
         existing = by_provider.get(provider)
         if existing is None:
             by_provider[provider] = model
             continue
-        # Replace if this model is Tier 0 and existing is not (prefer unlimited)
         if model.tier < existing.tier:
             by_provider[provider] = model
         elif model.tier == existing.tier and model.context_window > existing.context_window:
             by_provider[provider] = model
     return by_provider
+
+
+def unleash_warmup_models() -> tuple[str, ...]:
+    """Models to pre-warm in UnleashPool (tier 0-2, unique upstream ids).
+
+    Skips tier 3 thinker/file-picker agents — they spawn from parent sessions.
+    Order follows ALL_MODELS priority (newest per provider first).
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for model in ALL_MODELS:
+        if model.tier > 2:
+            continue
+        uid = model.upstream_id
+        if uid in seen:
+            continue
+        seen.add(uid)
+        out.append(uid)
+    return tuple(out)
 
 
 def agent_validation_payload() -> dict[str, object]:

@@ -6,8 +6,9 @@ the Anthropic API.
 
 ## Setup
 
-1. Start the gateway (same as Cursor setup — see `cursor-setup.md`).
+1. Start the gateway (same as Cursor setup — see [`cursor-setup.md`](cursor-setup.md)).
 2. Set `FREEBUFF_SYSTEM_PROMPT_OVERRIDE=` (empty) in `.env` for pure passthrough.
+3. For 24/7 VPS deploy with multiple accounts, see [`stealth-longrun.md`](stealth-longrun.md).
 
 ## Claude Code CLI
 
@@ -28,7 +29,7 @@ client = anthropic.Anthropic(
 )
 
 response = client.messages.create(
-    model="z-ai/glm-5.2",  # or any model from /v1/models
+    model="minimax/minimax-m3",  # default; or z-ai/glm-5.2, deepseek/deepseek-v4-pro, etc.
     max_tokens=1024,
     messages=[{"role": "user", "content": "Write a Python fizzbuzz."}],
 )
@@ -70,6 +71,11 @@ response = client.messages.create(
 The gateway converts Anthropic `input_schema` → OpenAI `function.parameters`
 on the way upstream, and converts OpenAI `tool_calls` → Anthropic
 `tool_use` blocks on the way back.
+
+## Rate governor
+
+`/v1/messages` uses the same rate governor as `/v1/chat/completions` when
+multiple accounts are configured — important for long Claude Code sessions on a VPS.
 
 ## Supported Anthropic features
 

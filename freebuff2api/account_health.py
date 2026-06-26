@@ -227,10 +227,7 @@ class AccountHealthRegistry:
         start: int = 0,
         now: float | None = None,
     ) -> int | None:
-        """Round-robin pick the next available account for `pool`.
-
-        Returns the account index, or None if all accounts are exhausted/banned.
-        """
+        """Round-robin pick the next available account for `pool."""
         avail = self.available_accounts(pool, now)
         if not avail:
             return None
@@ -240,6 +237,20 @@ class AccountHealthRegistry:
             if idx in avail:
                 return idx
         return avail[0]
+
+    def mark_success(self, account_index: int, pool: str) -> None:
+        if 0 <= account_index < len(self._health):
+            self._health[account_index].mark_success(pool)
+
+    def mark_exhausted(
+        self,
+        account_index: int,
+        pool: str,
+        *,
+        reset_at: float | None = None,
+    ) -> None:
+        if 0 <= account_index < len(self._health):
+            self._health[account_index].mark_exhausted(pool, reset_at=reset_at)
 
     def update_from_session_response(
         self,

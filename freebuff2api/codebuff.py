@@ -484,7 +484,9 @@ class CodebuffClient:
                 if session_instance_id and cache is not None:
                     import time as _time
 
-                    cache[session_instance_id] = _time.time()
+                    now = _time.time()
+                    cache[session_instance_id] = now
+                    _prune_ad_chain_cache(cache, now, ttl_seconds=cache_ttl_seconds)
                 return
             except CodebuffError as error:
                 logger.warning(
@@ -646,6 +648,29 @@ class CodebuffClient:
                     yield line
         except httpx.RequestError as error:
             raise _network_error("POST", url, error) from error
+
+
+def _prune_ad_chain_cache(
+    cache: dict[str, float],
+    now: float,
+    *,
+    ttl_seconds: float = 1800.0,
+    max_entries: int = 32,
+) -> None:
+    """Drop expired ad-chain entries so long-running gateways don't leak memory.
+
+    Warmup refresh creates a new instance_id every ~55min per (account, model).
+    Without pruning, _ad_chain_cache grows without bound over weeks.
+    """
+    stale = [k for k, ts in cache.items() if now - ts > ttl_seconds]
+    for k in stale:
+        cache.pop(k, None)
+    if len(cache) <= max_entries:
+        return
+    # Keep the newest max_entries (LRU by timestamp).
+    excess = len(cache) - max_entries
+    for k, _ in sorted(cache.items(), key=lambda x: x[1])[:excess]:
+        cache.pop(k, None)
 
 
 class SessionManager:
